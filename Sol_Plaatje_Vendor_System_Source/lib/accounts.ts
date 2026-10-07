@@ -1,17 +1,7 @@
-export const BOOTSTRAP_EMAIL = 'superuser@solplaatje.local';
-export const BOOTSTRAP_PASSWORD = 'SolPlaatje#2026';
-const BOOTSTRAP_NAME = 'LED Super User';
 const SESSION_DAYS = 12;
+const DUMMY_HASH = 'pbkdf2$100000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
-const defaultHubs: [string, string][] = [
-  ['hub-craven', 'Craven Street Container Hub'],
-  ['hub-arena', 'Arena Container Hub'],
-  ['hub-platfontein', 'Platfontein Container Hub'],
-  ['hub-greenpoint', 'Greenpoint Container Hub'],
-  ['hub-galeshewe', 'Galeshewe SMME Village'],
-];
-
-export type Account = {id: string; name: string; email: string; role: string; active: number};
+export type Account = {id: string; name: string; email: string; role: string; active: number; mustChangePassword?: number};
 
 type Sql = {
   prepare: (query: string) => {
@@ -69,54 +59,43 @@ export async function verifyPassword(password: string, stored: string) {
   return sameBytes(actual, base64ToBytes(hash));
 }
 
+export async function checkPassword(password: string, stored: string | undefined) {
+  return verifyPassword(password, stored || DUMMY_HASH);
+}
+
 export function publicAccount(account: Account) {
-  return {id: account.id, name: account.name, email: account.email, role: account.role};
+  return {id: account.id, name: account.name, email: account.email, role: account.role, mustChangePassword: Number(account.mustChangePassword) === 1};
 }
 
-export async function ensureAccounts(db: Sql) {
-  await db.prepare(`CREATE TABLE IF NOT EXISTS users (
-    id text PRIMARY KEY NOT NULL,
-    name text NOT NULL,
-    email text NOT NULL UNIQUE,
-    password_hash text NOT NULL,
-    role text NOT NULL,
-    active integer NOT NULL DEFAULT 1,
-    created_at text NOT NULL
-  )`).run();
-  await db.prepare(`CREATE TABLE IF NOT EXISTS sessions (
-    token text PRIMARY KEY NOT NULL,
-    user_id text NOT NULL,
-    expires_at text NOT NULL,
-    created_at text NOT NULL
-  )`).run();
-  await db.prepare(`CREATE TABLE IF NOT EXISTS hubs (
-    id text PRIMARY KEY NOT NULL,
-    name text NOT NULL UNIQUE,
-    created_at text NOT NULL,
-    updated_at text NOT NULL
-  )`).run();
-  const hubCount = await db.prepare('SELECT COUNT(*) AS n FROM hubs').first<{n: number}>();
-  if (!hubCount?.n) {
-    for (let index = 0; index < defaultHubs.length; index++) {
-      const [id, name] = defaultHubs[index];
-      const stamp = `2026-01-01T00:00:0${index}Z`;
-      await db.prepare('INSERT OR IGNORE INTO hubs(id,name,created_at,updated_at) VALUES(?,?,?,?)').bind(id, name, stamp, stamp).run();
-    }
-  }
-  const userCount = await db.prepare('SELECT COUNT(*) AS n FROM users').first<{n: number}>();
-  if (!userCount?.n) {
-    await db.prepare('INSERT OR IGNORE INTO users(id,name,email,password_hash,role,active,created_at) VALUES(?,?,?,?,?,?,?)')
-      .bind('user-superuser', BOOTSTRAP_NAME, BOOTSTRAP_EMAIL, await hashPassword(BOOTSTRAP_PASSWORD), 'superuser', 1, new Date().toISOString())
-      .run();
-  }
+export function passwordPending(account: Account) {
+  return Number(account.mustChangePassword) === 1;
 }
 
-export async function bootstrapStillActive(db: Sql) {
-  const row = await db.prepare('SELECT password_hash FROM users WHERE email=?').bind(BOOTSTRAP_EMAIL).first<{password_hash: string}>();
-  return !!row && await verifyPassword(BOOTSTRAP_PASSWORD, row.password_hash);
+/** Schema changes belong in drizzle migrations. This stays so existing routes can call it without creating tables. */
+export async function ensureAccounts(_db: Sql) {}
+
+export function requestIsSecure(req: Request) {
+  const forwarded = (req.headers.get('x-forwarded-proto') || '').split(',')[0].trim().toLowerCase();
+  if (forwarded === 'https') return true;
+  if (forwarded === 'http') return false;
+  return new URL(req.url).protocol === 'https:';
 }
 
-function sessionToken(req: Request) {
+export function isLocalHost(hostname: string) {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '10.0.2.2') return true;
+  const parts = host.split('.').map(Number);
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  if (parts[0] === 10 || parts[0] === 127) return true;
+  if (parts[0] === 192 && parts[1] === 168) return true;
+  return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
+}
+
+export function clientIp(req: Request) {
+  return (req.headers.get('cf-connecting-ip') || req.headers.get('x-forwarded-for') || 'local').split(',')[0].trim().slice(0, 80) || 'local';
+}
+
+export function sessionToken(req: Request) {
   const header = req.headers.get('authorization') || '';
   if (header.toLowerCase().startsWith('bearer ')) return header.slice(7).trim();
   const cookie = req.headers.get('cookie') || '';
@@ -127,25 +106,29 @@ function sessionToken(req: Request) {
 export async function sessionUser(db: Sql, req: Request): Promise<Account | null> {
   const token = sessionToken(req);
   if (!token || token.length > 200) return null;
-  const row = await db.prepare(`SELECT u.id,u.name,u.email,u.role,u.active FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>?`)
+  const row = await db.prepare(`SELECT u.id,u.name,u.email,u.role,u.active,u.must_change_password AS mustChangePassword FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>?`)
     .bind(token, new Date().toISOString()).first<Account>();
   if (!row || !row.active) return null;
   return row;
 }
 
-export async function openSession(db: Sql, userId: string) {
+export async function openSession(db: Sql, userId: string, device = '') {
   const token = bytesToBase64(crypto.getRandomValues(new Uint8Array(32))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
   const created = new Date();
   const expires = new Date(created.getTime() + SESSION_DAYS * 24 * 60 * 60 * 1000);
-  await db.prepare('INSERT INTO sessions(token,user_id,expires_at,created_at) VALUES(?,?,?,?)').bind(token, userId, expires.toISOString(), created.toISOString()).run();
+  await db.prepare('INSERT INTO sessions(token,user_id,expires_at,created_at,device) VALUES(?,?,?,?,?)').bind(token, userId, expires.toISOString(), created.toISOString(), device.slice(0, 160)).run();
   return {token, maxAge: SESSION_DAYS * 24 * 60 * 60};
 }
 
-export function sessionCookie(token: string, maxAge: number) {
+export function sessionCookie(token: string, maxAge: number, secure = false) {
   const value = token ? `led_session=${encodeURIComponent(token)}` : 'led_session=';
-  return `${value}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
+  return `${value}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
 }
 
 export async function clearSessions(db: Sql, userId: string) {
   await db.prepare('DELETE FROM sessions WHERE user_id=?').bind(userId).run();
+}
+
+export async function clearOtherSessions(db: Sql, userId: string, token: string) {
+  await db.prepare('DELETE FROM sessions WHERE user_id=? AND token<>?').bind(userId, token).run();
 }

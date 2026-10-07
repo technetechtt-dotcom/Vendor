@@ -1,6 +1,6 @@
 import {useEffect, useRef, useState} from 'react';
 import {ScanLine, Search, X, MapPin, ShieldCheck, Wallet, ChevronLeft, Camera, Check, LocateFixed, Wifi, Building2, ClipboardCheck, Loader2, Mail, Copy, LogOut} from 'lucide-react';
-import {Vendor, Entry, money, balance, permit, getRegisterBase, saveRegisterBase, getToken, getSession, saveSession, clearSession, authHeaders, photoUrl, noticeEmail, noticeText, FieldAccount} from './register';
+import {Vendor, Entry, Delivery, money, balance, permit, getRegisterBase, saveRegisterBase, getToken, saveSession, clearSession, authHeaders, noticeEmail, noticeText, hydrateSession, openProtected, FieldAccount} from './register';
 
 type VisitGPS = {lat: number; lng: number; accuracy: number};
 
@@ -8,13 +8,14 @@ const date = (value: string) => new Date(value.length === 10 ? value + 'T12:00:0
 
 export function App() {
   const [serverDraft, setServerDraft] = useState(getRegisterBase);
-  const [session, setSession] = useState<FieldAccount | null>(getSession);
+  const [session, setSession] = useState<FieldAccount | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [id, setId] = useState('');
   const [vendor, setVendor] = useState<Vendor | null>(null);
   const [events, setEvents] = useState<Entry[]>([]);
+  const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -28,6 +29,8 @@ export function App() {
   const [notice, setNotice] = useState('');
   const [scannerMessage, setScannerMessage] = useState('Starting the camera…');
   const video = useRef<HTMLVideoElement | null>(null);
+  const visitKey = useRef('');
+  const [portrait, setPortrait] = useState('');
 
   function requireServer() {
     const base = getRegisterBase();
@@ -67,6 +70,7 @@ export function App() {
       if (!response.ok) throw new Error(body.error || 'Unable to load this vendor');
       setVendor(body.vendor);
       setEvents(body.events);
+      setDeliveries(Array.isArray(body.deliveries) ? body.deliveries : []);
       setTab('Profile');
       setVisit(false);
     } catch (cause) {
@@ -75,6 +79,16 @@ export function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function refreshRecord(vendorId: string) {
+    const base = getRegisterBase();
+    if (!base) return;
+    const response = await fetch(`${base}/api/register?vendorId=${encodeURIComponent(vendorId)}`, {cache: 'no-store', headers: authHeaders()});
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || 'Could not refresh this vendor');
+    setEvents(body.events);
+    setDeliveries(Array.isArray(body.deliveries) ? body.deliveries : []);
   }
 
   useEffect(() => {
@@ -122,6 +136,7 @@ export function App() {
       setError('Enter the visit findings and action required.');
       return;
     }
+    if (!visitKey.current) visitKey.current = crypto.randomUUID();
     setBusy(true);
     setError('');
     const details = note.trim() + (gps
@@ -131,15 +146,16 @@ export function App() {
       const response = await fetch(`${base}/api/register`, {
         method: 'POST',
         headers: authHeaders(true),
-        body: JSON.stringify({action: 'event', vendorId: vendor.id, kind, note: details, due, amount: 0}),
+        body: JSON.stringify({action: 'event', vendorId: vendor.id, kind, note: details, due, amount: 0, idempotencyKey: visitKey.current}),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error);
       try {
         const next = await fetch(`${base}/api/register?vendorId=${encodeURIComponent(vendor.id)}`, {cache: 'no-store', headers: authHeaders()});
         const nextBody = await next.json();
-        if (next.ok) setEvents(nextBody.events);
+        if (next.ok) { setEvents(nextBody.events); setDeliveries(Array.isArray(nextBody.deliveries) ? nextBody.deliveries : []); }
       } catch { /* The write succeeded; do not offer a duplicate submission. */ }
+      visitKey.current = '';
       setVisit(false);
       setNote('');
       setDue('');
@@ -173,24 +189,33 @@ export function App() {
   }
 
   useEffect(() => {
-    const base = getRegisterBase();
-    const token = getToken();
-    if (!base || !token) {
-      setAuthReady(true);
-      return;
-    }
-    fetch(`${base}/api/auth`, {headers: authHeaders(), cache: 'no-store'})
-      .then(async response => {
+    let cancelled = false;
+    (async () => {
+      await hydrateSession();
+      if (cancelled) return;
+      setServerDraft(getRegisterBase());
+      const base = getRegisterBase();
+      const token = getToken();
+      if (!base || !token) {
+        setAuthReady(true);
+        return;
+      }
+      try {
+        const response = await fetch(`${base}/api/auth`, {headers: authHeaders(), cache: 'no-store'});
         const body = await response.json();
-        if (!response.ok) throw new Error(body.error || 'Sign in again.');
-        setSession(body.user);
-        saveSession(token, body.user);
-      })
-      .catch(() => {
+        if (!response.ok || !body.user) throw new Error(body.error || 'Sign in again.');
+        if (!cancelled) {
+          setSession(body.user);
+          saveSession(token, body.user);
+        }
+      } catch {
         clearSession();
-        setSession(null);
-      })
-      .finally(() => setAuthReady(true));
+        if (!cancelled) setSession(null);
+      } finally {
+        if (!cancelled) setAuthReady(true);
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   async function signIn(event: React.FormEvent) {
@@ -238,7 +263,20 @@ export function App() {
   }
 
   const open = events.filter(entry => ['Warning', 'Violation'].includes(entry.kind) && !entry.resolved);
-  const portrait = vendor?.photo ? photoUrl(vendor.photo) : '';
+  useEffect(() => {
+    if (!vendor?.photo) { setPortrait(''); return; }
+    let cancelled = false;
+    let objectUrl = '';
+    (async () => {
+      try {
+        const response = await fetch(getRegisterBase() + vendor.photo, {cache: 'no-store', headers: authHeaders()});
+        if (!response.ok) return;
+        objectUrl = URL.createObjectURL(await response.blob());
+        if (!cancelled) setPortrait(objectUrl);
+      } catch { if (!cancelled) setPortrait(''); }
+    })();
+    return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [vendor?.id, vendor?.photo]);
 
   return (
     <div className="field-app">
@@ -247,7 +285,7 @@ export function App() {
         {session && <button className="icon-button" aria-label="Sign out" onClick={signOut}><LogOut size={19} /></button>}
       </header>
       <main className="field-main">
-        <div className="field-eyebrow"><span><ShieldCheck size={14} />{session ? session.name : 'Sign in required'}</span><span><Wifi size={14} />{session ? 'Signed in' : 'Not signed in'}</span></div>
+        <div className="field-eyebrow"><span><ShieldCheck size={14} />{session ? session.name : 'Sign in required'}</span><span><Wifi size={14} />{session ? 'Signed in' : 'Not signed in'}</span>{session && <button type="button" className="text-button" onClick={async () => { const base = getRegisterBase(); if (!base) return; const response = await fetch(`${base}/api/auth`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify({action: 'revoke-sessions'})}); const body = await response.json().catch(() => ({})); setError(''); setNotice(response.ok ? 'Other devices were signed out.' : (body.error || 'Could not sign out other devices.')); }}>Sign out other devices</button>}</div>
         {error && <div className="field-alert" role="alert">{error}</div>}
         {notice && <div className="field-success" role="status"><Check size={17} />{notice}</div>}
         {!authReady ? <p className="muted">Checking your session…</p> : !session ? (
@@ -261,7 +299,39 @@ export function App() {
               <input id="officer-password" type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required />
               <button type="submit" disabled={busy}>{busy ? <Loader2 className="spin" size={18} /> : 'Sign in'}</button>
             </div>
-            <small>Use the account created by the super user. On this computer the register address is http://127.0.0.1:5173.</small>
+            <small>Use the account created by the super user. On this computer the register address is http://127.0.0.1:5173. A public address must use https.</small>
+          </form>
+        ) : session.mustChangePassword ? (
+          <form className="field-server" onSubmit={async event => {
+            event.preventDefault();
+            const next = (document.getElementById('new-password') as HTMLInputElement).value;
+            const confirm = (document.getElementById('confirm-password') as HTMLInputElement).value;
+            const current = (document.getElementById('current-password') as HTMLInputElement).value;
+            if (next !== confirm) { setError('Enter the same new password twice.'); return; }
+            setBusy(true);
+            setError('');
+            try {
+              const response = await fetch(`${getRegisterBase()}/api/auth`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify({action: 'change-password', currentPassword: current, password: next})});
+              const body = await response.json();
+              if (!response.ok) throw new Error(body.error || 'Could not change the password');
+              saveSession(getToken(), body.user);
+              setSession(body.user);
+              setNotice('Password updated.');
+            } catch (cause) {
+              setError(cause instanceof Error ? cause.message : 'Could not change the password');
+            } finally {
+              setBusy(false);
+            }
+          }}>
+            <h1>Choose a new password</h1>
+            <p>This account cannot open vendor records until the password is replaced.</p>
+            <label htmlFor="current-password">Current password</label>
+            <input id="current-password" className="block" type="password" autoComplete="current-password" required />
+            <label htmlFor="new-password">New password</label>
+            <input id="new-password" className="block" type="password" autoComplete="new-password" minLength={8} required />
+            <label htmlFor="confirm-password">Confirm new password</label>
+            <input id="confirm-password" className="block" type="password" autoComplete="new-password" minLength={8} required />
+            <button type="submit" disabled={busy}>{busy ? <Loader2 className="spin" size={18} /> : 'Save password'}</button>
           </form>
         ) : !vendor ? (
           <>
@@ -292,7 +362,7 @@ export function App() {
           <>
             <button className="field-back" onClick={() => { setVendor(null); setVisit(false); setError(''); setNotice(''); }}><ChevronLeft size={17} />Scan another card</button>
             <div className="field-vendor-head">
-              {portrait ? <img src={portrait} alt={vendor.name} /> : <span>{vendor.name.split(' ').slice(0, 2).map(part => part[0]).join('')}</span>}
+              {portrait ? <img src={portrait} alt={'Profile picture of ' + vendor.name} /> : <span>{vendor.name.split(' ').slice(0, 2).map(part => part[0]).join('')}</span>}
               <div><p className="mono">{vendor.id}</p><h1>{vendor.business}</h1><p>{vendor.name}</p></div>
             </div>
             {vendor.sample && <div className="field-sample">Sample vendor · not a municipal record or valid permit</div>}
@@ -322,7 +392,7 @@ export function App() {
                 {vendor.lat && vendor.lng && <a className="secondary field-wide" target="_blank" rel="noreferrer" href={`https://www.google.com/maps?q=${vendor.lat},${vendor.lng}`}><MapPin size={17} />Open registered location</a>}
                 <h3>Verification recorded by LED Office</h3>
                 {vendor.documents.length ? vendor.documents.map(item => <div className="field-check" key={item}><Check size={16} />{item}</div>) : <p className="muted">No verification items recorded.</p>}
-                {(vendor.files || []).length > 0 && <><h3>Uploaded documents</h3>{(vendor.files || []).map(file => <button type="button" className="secondary field-wide" key={file.id} onClick={async () => { const base = getRegisterBase(); const response = await fetch(base + file.url, {cache: 'no-store', headers: authHeaders()}); if (!response.ok) { setError('Could not open this document.'); return; } const blob = await response.blob(); window.open(URL.createObjectURL(blob)); }}>{file.label}</button>)}</>}
+                {(vendor.files || []).length > 0 && <><h3>Uploaded documents</h3>{(vendor.files || []).map(file => <button type="button" className="secondary field-wide" key={file.id} onClick={async () => { try { await openProtected(file.url); } catch { setError('Could not open this document.'); } }}>{file.label}</button>)}</>}
               </section>
             )}
             {tab === 'Fees' && (
@@ -341,7 +411,7 @@ export function App() {
             {tab === 'Compliance' && (
               <section className="field-panel">
                 <div className="field-section-title"><h2>Compliance & visits</h2><span>{open.length} open cases</span></div>
-                {events.filter(entry => ['Inspection', 'Warning', 'Violation', 'Resolution'].includes(entry.kind)).map(entry => (
+                {events.filter(entry => ['Inspection', 'Warning', 'Violation', 'Resolution', 'Escalation'].includes(entry.kind)).map(entry => (
                   <div className="field-entry" key={entry.id}>
                     <div><span className={'badge ' + (entry.resolved ? 'good' : entry.kind === 'Violation' ? 'bad' : entry.kind === 'Warning' ? 'amber' : 'neutral')}>{entry.resolved ? 'Resolved ' + entry.kind : entry.kind}</span><span>{date(entry.createdAt)}</span></div>
                     <p>{entry.note}</p>
@@ -349,10 +419,14 @@ export function App() {
                     {['Warning', 'Violation'].includes(entry.kind) && (
                       <>
                         <div className="notice-actions">
-                          <a href={noticeEmail(vendor, entry)}><Mail size={16} />Email notice</a>
-                          <button onClick={async () => { try { await navigator.clipboard.writeText(noticeText(vendor, entry)); setNotice('Notice copied. Paste it into your official email.'); } catch { setError('Copy unavailable. Use the email action or select the notice text.'); } }}><Copy size={16} />Copy notice</button>
+                          <a href={noticeEmail(vendor, entry)} onClick={() => fetch(`${getRegisterBase()}/api/notice`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify({action: 'deliver', eventId: entry.id, method: 'draft'})}).catch(() => {})}><Mail size={16} />Email draft</a>
+                          <button type="button" onClick={async () => { try { await openProtected('/api/notice?eventId=' + encodeURIComponent(entry.id)); await refreshRecord(vendor.id); setNotice('PDF downloaded. The download is recorded on this notice.'); } catch { setError('Could not download the notice.'); } }}><Copy size={16} />Download PDF</button>
+                          <button type="button" onClick={async () => { try { await navigator.clipboard.writeText(noticeText(vendor, entry)); setNotice('Notice copied. Paste it into your official email.'); } catch { setError('Copy unavailable. Use the email draft or PDF.'); } }}><Copy size={16} />Copy notice</button>
+                          <button type="button" onClick={() => fetch(`${getRegisterBase()}/api/notice`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify({action: 'deliver', eventId: entry.id, method: 'handover'})}).then(async response => { const body = await response.json(); if (!response.ok) throw new Error(body.error); await refreshRecord(vendor.id); setNotice(body.message); }).catch(cause => setError(cause instanceof Error ? cause.message : 'Could not record handover.'))}>Handed to trader</button>
+                          <button type="button" onClick={() => { const reason = window.prompt('Why is this case being escalated?'); if (!reason || !reason.trim()) return; fetch(`${getRegisterBase()}/api/notice`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify({action: 'escalate', eventId: entry.id, note: reason.trim()})}).then(async response => { const body = await response.json(); if (!response.ok) throw new Error(body.error); setNotice(body.message); lookup(vendor.id); }).catch(cause => setError(cause instanceof Error ? cause.message : 'Could not record the escalation.')); }}>Escalate</button>
                         </div>
-                        <p className="notice-help">Opens an email draft{vendor.email ? ' addressed to ' + vendor.email : '. Add the recipient in your email app'}. The official sends it; email delivery is not tracked.</p>
+                        <p className="notice-help">The email draft is a fallback and is not marked as sent. Download the PDF or record that it was handed to the trader.</p>
+                        {deliveries.filter(item => item.eventId === entry.id).map(item => <small className="notice-log" key={item.id}>{date(item.createdAt)} · {item.method} · {item.status} · {item.actor}</small>)}
                       </>
                     )}
                   </div>

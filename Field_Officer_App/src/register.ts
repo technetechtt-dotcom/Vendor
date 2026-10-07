@@ -14,7 +14,11 @@ const STORAGE_KEY = 'solplaatje.field.registerBase';
 const TOKEN_KEY = 'solplaatje.field.token';
 const USER_KEY = 'solplaatje.field.user';
 
-export type FieldAccount = {id: string; name: string; email: string; role: string};
+export type FieldAccount = {id: string; name: string; email: string; role: string; mustChangePassword?: boolean};
+export type Delivery = {id: string; eventId: string; method: string; status: string; actor: string; createdAt: string};
+
+let memoryToken = '';
+let memoryUser: FieldAccount | null = null;
 
 export const money = (cents: number) => new Intl.NumberFormat('en-ZA', {style: 'currency', currency: 'ZAR', maximumFractionDigits: 2}).format(cents / 100);
 export const balance = (id: string, events: Entry[]) => events.filter(event => event.vendorId === id).reduce((total, event) => total + (event.kind === 'Charge' ? event.amount : event.kind === 'Payment' ? -event.amount : 0), 0);
@@ -24,35 +28,91 @@ export function getRegisterBase() {
   return localStorage.getItem(STORAGE_KEY) || '';
 }
 
+function localHost(hostname: string) {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '10.0.2.2') return true;
+  const parts = host.split('.').map(Number);
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  if (parts[0] === 10 || parts[0] === 127) return true;
+  if (parts[0] === 192 && parts[1] === 168) return true;
+  return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
+}
+
 export function saveRegisterBase(raw: string) {
   const value = raw.trim();
   if (!value) throw new Error('Enter the vendor register address.');
-  const withProtocol = /^https?:\/\//i.test(value) ? value : `http://${value}`;
+  let withProtocol = value;
+  if (!/^https?:\/\//i.test(value)) {
+    const host = value.split('/')[0].split(':')[0];
+    withProtocol = `${localHost(host) ? 'http' : 'https'}://${value}`;
+  }
   const url = new URL(withProtocol);
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('Use an http or https address.');
+  if (url.protocol === 'http:' && !localHost(url.hostname)) throw new Error('Use https:// for a public vendor register address.');
   const base = url.origin;
   localStorage.setItem(STORAGE_KEY, base);
   return base;
 }
 
+async function nativePreferences() {
+  const capacitor = (globalThis as {Capacitor?: {isNativePlatform?: () => boolean}}).Capacitor;
+  if (!capacitor?.isNativePlatform?.()) return null;
+  const module = await import('@capacitor/preferences');
+  return module.Preferences;
+}
+
+async function writeProtected(token: string, user: FieldAccount | null) {
+  const preferences = await nativePreferences();
+  if (preferences) {
+    if (token) await preferences.set({key: TOKEN_KEY, value: token});
+    else await preferences.remove({key: TOKEN_KEY});
+    if (user) await preferences.set({key: USER_KEY, value: JSON.stringify(user)});
+    else await preferences.remove({key: USER_KEY});
+    return;
+  }
+  if (token) sessionStorage.setItem(TOKEN_KEY, token);
+  else sessionStorage.removeItem(TOKEN_KEY);
+  if (user) sessionStorage.setItem(USER_KEY, JSON.stringify(user));
+  else sessionStorage.removeItem(USER_KEY);
+}
+
+export async function hydrateSession() {
+  const legacyToken = localStorage.getItem(TOKEN_KEY) || '';
+  const legacyUser = localStorage.getItem(USER_KEY) || '';
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+  const preferences = await nativePreferences();
+  if (preferences) {
+    memoryToken = legacyToken || (await preferences.get({key: TOKEN_KEY})).value || '';
+    const raw = legacyUser || (await preferences.get({key: USER_KEY})).value || '';
+    memoryUser = raw ? JSON.parse(raw) : null;
+    if (legacyToken) await writeProtected(memoryToken, memoryUser);
+    return;
+  }
+  memoryToken = legacyToken || sessionStorage.getItem(TOKEN_KEY) || '';
+  const raw = legacyUser || sessionStorage.getItem(USER_KEY) || '';
+  memoryUser = raw ? JSON.parse(raw) : null;
+  if (legacyToken || legacyUser) await writeProtected(memoryToken, memoryUser);
+}
+
 export function getToken() {
-  return localStorage.getItem(TOKEN_KEY) || '';
+  return memoryToken;
 }
 
 export function getSession(): FieldAccount | null {
-  const raw = localStorage.getItem(USER_KEY);
-  if (!raw) return null;
-  try { return JSON.parse(raw); } catch { return null; }
+  return memoryUser;
 }
 
 export function saveSession(token: string, user: FieldAccount) {
-  localStorage.setItem(TOKEN_KEY, token);
-  localStorage.setItem(USER_KEY, JSON.stringify(user));
+  memoryToken = token;
+  memoryUser = user;
+  void writeProtected(token, user);
 }
 
 export function clearSession() {
-  localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(USER_KEY);
+  memoryToken = '';
+  memoryUser = null;
+  void writeProtected('', null);
 }
 
 export function authHeaders(json = false): HeadersInit {
@@ -63,11 +123,14 @@ export function authHeaders(json = false): HeadersInit {
   return headers;
 }
 
-export function photoUrl(photo: string) {
-  if (!photo) return '';
-  if (/^https?:\/\//i.test(photo)) return photo;
+export async function openProtected(path: string) {
   const base = getRegisterBase();
-  return base ? base + (photo.startsWith('/') ? photo : `/${photo}`) : photo;
+  const response = await fetch(base + path, {cache: 'no-store', headers: authHeaders()});
+  if (!response.ok) throw new Error('Could not open this file.');
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  window.open(url);
+  return url;
 }
 
 export function noticeText(vendor: Vendor, entry: Entry) {
@@ -75,7 +138,12 @@ export function noticeText(vendor: Vendor, entry: Entry) {
     'SOL PLAATJE MUNICIPALITY',
     'LOCAL ECONOMIC DEVELOPMENT OFFICE',
     `${entry.kind.toUpperCase()} NOTICE`,
-    vendor.sample ? 'SAMPLE NOTICE — NOT A MUNICIPAL ENFORCEMENT NOTICE' : '',
+    vendor.sample ? 'SAMPLE NOTICE - NOT A MUNICIPAL ENFORCEMENT NOTICE' : '',
+    entry.kind === 'Violation'
+      ? 'APPROVED TEMPLATE - VIOLATION NOTICE\nThe LED Office records that a site visit found a trading condition was not met. The findings below are the official record of what was observed and the action the trader must take. This notice does not set a fine, cancel a permit, or confirm that an email was delivered.'
+      : entry.kind === 'Warning'
+        ? 'APPROVED TEMPLATE - WARNING NOTICE\nThe LED Office records that a site visit requires the trader to correct the findings below before the follow-up date. This notice does not set a fine or confirm that an email was delivered.'
+        : '',
     '',
     `Notice reference: ${entry.id}`,
     `Recorded: ${new Date(entry.createdAt).toLocaleString('en-ZA', {timeZone: 'Africa/Johannesburg'})}`,
@@ -93,6 +161,7 @@ export function noticeText(vendor: Vendor, entry: Entry) {
     `Case status: ${entry.resolved ? 'Resolved' : 'Open'}`,
     '',
     'Please contact the LED Office to discuss this notice or provide the requested information.',
+    'An email draft is a fallback. It is not a delivery record until an official records handover, acknowledgement, or an accepted municipal send.',
   ].filter(line => line !== undefined).join('\n');
 }
 

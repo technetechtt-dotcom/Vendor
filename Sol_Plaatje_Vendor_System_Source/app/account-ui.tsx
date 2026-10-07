@@ -2,34 +2,39 @@
 import {useEffect, useState} from 'react';
 import {Building2, Check, Loader2} from 'lucide-react';
 
-export type Account = {id: string; name: string; email: string; role: 'superuser' | 'office' | 'field'};
-type OrgUser = Account & {active: number};
+export type Account = {id: string; name: string; email: string; role: 'superuser' | 'office' | 'field'; mustChangePassword?: boolean};
+type OrgUser = Account & {active: number; mustChangePassword?: number};
 
 const roleLabel = (role: string) => role === 'superuser' ? 'Super user' : role === 'field' ? 'Field officer' : 'Office user';
 
-export function LoginScreen({onSuccess}: {onSuccess: (user: Account) => void}) {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+function fieldValue(form: HTMLFormElement, name: string) {
+  const field = form.elements.namedItem(name);
+  return field && 'value' in field ? String(field.value) : '';
+}
+
+export function LoginScreen({onSuccess, setupRequired = false}: {onSuccess: (user: Account) => void; setupRequired?: boolean}) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [bootstrap, setBootstrap] = useState(false);
-  useEffect(() => {
-    fetch('/api/auth').then(response => response.json()).then(body => setBootstrap(!!body.bootstrap)).catch(() => {});
-  }, []);
   return (
     <div className="login-screen">
       <section className="login-card">
         <div className="brand"><div className="brand-mark"><Building2 size={26} /></div><div>Sol Plaatje<span>MUNICIPALITY</span></div></div>
         <p className="eyebrow">LOCAL ECONOMIC DEVELOPMENT</p>
-        <h1>Sign in to the vendor register</h1>
-        <p className="subtitle">Office staff and the super user sign in here. Field officers sign in on the field visits app.</p>
+        <h1>{setupRequired ? 'Create the administrator' : 'Sign in to the vendor register'}</h1>
+        <p className="subtitle">{setupRequired ? 'This register has no users yet. Create the super user once. The password is not shown again.' : 'Office staff and the super user sign in here. Field officers sign in on the field visits app.'}</p>
         <form onSubmit={async event => {
           event.preventDefault();
+          const form = event.currentTarget;
+          const name = fieldValue(form, 'name').trim();
+          const email = fieldValue(form, 'email').trim();
+          const password = fieldValue(form, 'password');
+          const confirm = fieldValue(form, 'confirm');
           setBusy(true);
           setError('');
           try {
-            const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'login', email, password})});
-            const body = await response.json();
+            if (setupRequired && password !== confirm) throw new Error('Enter the same password twice.');
+            const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(setupRequired ? {action: 'setup', name, email, password} : {action: 'login', email, password})});
+            const body: any = await response.json();
             if (!response.ok) throw new Error(body.error || 'Sign-in failed');
             onSuccess(body.user);
           } catch (cause) {
@@ -39,11 +44,57 @@ export function LoginScreen({onSuccess}: {onSuccess: (user: Account) => void}) {
           }
         }}>
           {error && <div className="field-alert" role="alert">{error}</div>}
-          <label>Email address<input type="email" autoComplete="username" value={email} onChange={event => setEmail(event.target.value)} required /></label>
-          <label>Password<input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required /></label>
-          <button className="primary" disabled={busy} type="submit">{busy ? <Loader2 size={17} className="spin" /> : <Check size={17} />}Sign in</button>
+          {setupRequired && <label>Full name<input name="name" autoComplete="name" required /></label>}
+          <label>Email address<input name="email" type="email" autoComplete="username" required /></label>
+          <label>Password<input name="password" type="password" autoComplete={setupRequired ? 'new-password' : 'current-password'} required minLength={setupRequired ? 12 : 8} /></label>
+          {setupRequired && <label>Confirm password<input name="confirm" type="password" autoComplete="new-password" required minLength={12} /></label>}
+          <button className="primary" disabled={busy} type="submit">{busy ? <Loader2 size={17} className="spin" /> : <Check size={17} />}{setupRequired ? 'Create administrator' : 'Sign in'}</button>
         </form>
-        {bootstrap && <p className="login-hint">First super user: superuser@solplaatje.local · password SolPlaatje#2026. Change this password after signing in.</p>}
+      </section>
+    </div>
+  );
+}
+
+export function ChangePasswordScreen({onSuccess, onSignOut}: {onSuccess: (user: Account) => void; onSignOut: () => void}) {
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="login-screen">
+      <section className="login-card">
+        <div className="brand"><div className="brand-mark"><Building2 size={26} /></div><div>Sol Plaatje<span>MUNICIPALITY</span></div></div>
+        <p className="eyebrow">LOCAL ECONOMIC DEVELOPMENT</p>
+        <h1>Choose a new password</h1>
+        <p className="subtitle">This account cannot open the register until the password is replaced. Use a different password of at least 8 characters. Other devices signed in with the previous password are signed out.</p>
+        <form onSubmit={async event => {
+          event.preventDefault();
+          const form = event.currentTarget;
+          const currentPassword = fieldValue(form, 'currentPassword');
+          const password = fieldValue(form, 'password');
+          const confirm = fieldValue(form, 'confirm');
+          setError('');
+          if (password !== confirm) {
+            setError('Enter the same new password twice.');
+            return;
+          }
+          setBusy(true);
+          try {
+            const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'change-password', currentPassword, password})});
+            const body: any = await response.json();
+            if (!response.ok) throw new Error(body.error || 'Could not change the password');
+            onSuccess(body.user);
+          } catch (cause) {
+            setError(cause instanceof Error ? cause.message : 'Could not change the password');
+          } finally {
+            setBusy(false);
+          }
+        }}>
+          {error && <div className="field-alert" role="alert">{error}</div>}
+          <label>Current password<input name="currentPassword" type="password" autoComplete="current-password" required /></label>
+          <label>New password<input name="password" type="password" autoComplete="new-password" required minLength={8} /></label>
+          <label>Confirm new password<input name="confirm" type="password" autoComplete="new-password" required minLength={8} /></label>
+          <button className="primary" disabled={busy} type="submit">{busy ? <Loader2 size={17} className="spin" /> : <Check size={17} />}Save password</button>
+        </form>
+        <button className="text-button" type="button" onClick={onSignOut}>Sign out</button>
       </section>
     </div>
   );
@@ -57,7 +108,7 @@ export function UsersScreen() {
   const [busy, setBusy] = useState(false);
   async function load() {
     const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'users'})});
-    const body = await response.json();
+    const body: any = await response.json();
     if (!response.ok) throw new Error(body.error || 'Could not load users');
     setUsers(body.users);
   }
@@ -72,7 +123,7 @@ export function UsersScreen() {
         setNotice('');
         try {
           const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'save-user', user: draft})});
-          const body = await response.json();
+          const body: any = await response.json();
           if (!response.ok) throw new Error(body.error || 'Could not save this user');
           setDraft({id: '', name: '', email: '', role: 'office', password: '', active: true});
           setNotice(draft.id ? 'User updated.' : 'User added.');
@@ -89,13 +140,14 @@ export function UsersScreen() {
           <label>Full name<input value={draft.name} onChange={event => setDraft({...draft, name: event.target.value})} required /></label>
           <label>Email address<input type="email" value={draft.email} onChange={event => setDraft({...draft, email: event.target.value})} required /></label>
           <label>Role<select value={draft.role} onChange={event => setDraft({...draft, role: event.target.value})}><option value="office">Office user</option><option value="field">Field officer</option><option value="superuser">Super user</option></select></label>
-          <label>{draft.id ? 'New password (optional)' : 'Password'}<input type="password" autoComplete="new-password" value={draft.password} onChange={event => setDraft({...draft, password: event.target.value})} required={!draft.id} minLength={draft.password ? 8 : undefined} /></label>
+          <label>{draft.id ? 'New password (optional)' : 'Temporary password'}<input type="password" autoComplete="new-password" value={draft.password} onChange={event => setDraft({...draft, password: event.target.value})} required={!draft.id} minLength={draft.password ? 8 : undefined} /></label>
         </div>
         <label className="check-line"><input type="checkbox" checked={draft.active} onChange={event => setDraft({...draft, active: event.target.checked})} />Account can sign in</label>
+        <p className="hint">A password set for someone else is temporary. They must replace it the next time they sign in. There is no email reset: set a new temporary password here if they are locked out.</p>
         <div className="modal-foot user-form-actions"><button className="secondary" type="button" onClick={() => setDraft({id: '', name: '', email: '', role: 'office', password: '', active: true})}>Clear</button><button className="primary" disabled={busy} type="submit">{busy ? <Loader2 size={16} className="spin" /> : <Check size={16} />}{draft.id ? 'Save user' : 'Add user'}</button></div>
       </form>
       <div className="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Access</th><th></th></tr></thead><tbody>
-        {users.map(user => <tr key={user.id}><td><strong>{user.name}</strong></td><td>{user.email}</td><td>{roleLabel(user.role)}</td><td>{user.active ? 'Active' : 'Disabled'}</td><td><button className="text-button" type="button" onClick={() => { setDraft({id: user.id, name: user.name, email: user.email, role: user.role, password: '', active: !!user.active}); setNotice(''); setError(''); }}>Edit</button></td></tr>)}
+        {users.map(user => <tr key={user.id}><td><strong>{user.name}</strong></td><td>{user.email}</td><td>{roleLabel(user.role)}</td><td>{user.active ? (user.mustChangePassword ? 'Must change password' : 'Active') : 'Disabled'}</td><td><button className="text-button" type="button" onClick={() => { setDraft({id: user.id, name: user.name, email: user.email, role: user.role, password: '', active: !!user.active}); setNotice(''); setError(''); }}>Edit</button><button className="text-button" type="button" onClick={async () => { setError(''); setNotice(''); try { const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'revoke-sessions', userId: user.id})}); const body: any = await response.json(); if (!response.ok) throw new Error(body.error || 'Could not sign out devices'); setNotice('Signed out devices for ' + user.name + '.'); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not sign out devices'); } }}>Sign out devices</button></td></tr>)}
       </tbody></table></div>
     </section>
   );
