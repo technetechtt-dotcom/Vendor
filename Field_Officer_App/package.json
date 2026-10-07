@@ -1,0 +1,27 @@
+{
+  "name": "led-field-visits",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5174 --host 127.0.0.1",
+    "build": "vite build",
+    "apk": "npm run build && npx cap sync android && node scripts/assemble-apk.mjs"
+  },
+  "dependencies": {
+    "@capacitor/android": "7.4.4",
+    "@capacitor/core": "7.4.4",
+    "@zxing/browser": "0.1.5",
+    "lucide-react": "1.49.0",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "7.4.4",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "4.7.0",
+    "typescript": "5.9.3",
+    "vite": "6.3.6"
+  }
+}

@@ -1,0 +1,19 @@
+export const hubs=['Craven Street Container Hub','Arena Container Hub','Platfontein Container Hub','Greenpoint Container Hub','Galeshewe SMME Village'];
+export type VendorFile={id:string;label:string;name:string;url:string;contentType:string};
+export type Vendor={id:string;name:string;business:string;type:'Formal'|'Informal';sector:string;hub:string;unit:string;address:string;lat:string;lng:string;phone:string;email:string;issued:string;expires:string;status:string;documents:string[];files?:VendorFile[];photo:string;sample?:boolean};
+export type Entry={id:string;vendorId:string;kind:string;amount:number;note:string;due:string;createdAt:string;actor:string;resolved:number};
+export const blank:Vendor={id:'',name:'',business:'',type:'Formal',sector:'',hub:hubs[0],unit:'',address:'',lat:'',lng:'',phone:'',email:'',issued:new Date().toISOString().slice(0,10),expires:'',status:'Pending review',documents:[],files:[],photo:''};
+export const samples:Vendor[]=[
+['Lerato Mokoena','Lerato’s Fresh Produce','Formal','Fresh produce',hubs[0],'C-04','', '', '', 'Approved','2027-03-31'],
+['Thabo Diale','Diale Phone Repairs','Formal','Electronics & repairs',hubs[1],'A-12','','','','Approved','2027-03-31'],
+['Nomsa Jacobs','Nomsa’s Kitchen','Formal','Food & catering',hubs[4],'G-05','','','','Pending review','2026-10-25'],
+['Petrus van Wyk','Kalahari Craft Studio','Formal','Arts & crafts',hubs[2],'P-02','','','','Approved','2027-03-31'],
+['Bongiwe Molefe','Bongi Hair & Beauty','Formal','Hair & beauty',hubs[3],'B-08','','','','Approved','2027-03-31'],
+['Karabo Seoka','Karabo Fruit Stand','Informal','Fresh produce','','CBD-018','Example sidewalk location, Kimberley','-28.7381','24.7635','Approved','2027-03-31'],
+['Sarah Williams','Sarah’s Street Kitchen','Informal','Food & catering','','CBD-021','Example sidewalk location, Kimberley','-28.7412','24.7660','Pending review','2026-10-12'],
+['David Motsepe','Motsepe Accessories','Informal','Clothing & accessories','','GAL-007','Example street trading location','-28.7238','24.7382','Suspended','2026-09-30']
+].map((a,i)=>({...blank,id:'SPM-2026-'+String(i+1).padStart(4,'0'),name:a[0],business:a[1],type:a[2] as 'Formal'|'Informal',sector:a[3],hub:a[4],unit:a[5],address:a[6],lat:a[7],lng:a[8],status:a[9],expires:a[10],issued:'2026-04-01',documents:i===2||i===6?['Identity verified']:['Identity verified','Trading approval','Occupancy agreement'].filter(x=>a[2]==='Formal'||x!=='Occupancy agreement'),sample:true}));
+export const sampleEvents:Entry[]=samples.flatMap((v,i)=>[{id:'sample-charge-'+i,vendorId:v.id,kind:'Charge',amount:v.type==='Formal'?45000:15000,note:'Illustrative vendor fee · October 2026',due:'2026-10-07',createdAt:'2026-10-01T08:00:00Z',actor:'Sample record',resolved:0},...(i!==2&&i!==6&&i!==7?[{id:'sample-payment-'+i,vendorId:v.id,kind:'Payment',amount:v.type==='Formal'?45000:15000,note:'Illustrative payment reference DEMO-'+(i+1),due:'',createdAt:'2026-10-01T09:00:00Z',actor:'Sample record',resolved:0}]:[]),...(i===6||i===7?[{id:'sample-warning-'+i,vendorId:v.id,kind:i===6?'Warning':'Violation',amount:0,note:i===6?'Food handling documentation requires review.':'Trading outside the recorded allocation; follow-up required.',due:'2026-10-08',createdAt:'2026-09-29T10:00:00Z',actor:'Sample officer',resolved:0}]:[])]);
+export const money=(c:number)=>new Intl.NumberFormat('en-ZA',{style:'currency',currency:'ZAR',maximumFractionDigits:2}).format(c/100);
+export const balance=(id:string,es:Entry[])=>es.filter(e=>e.vendorId===id).reduce((n,e)=>n+(e.kind==='Charge'?e.amount:e.kind==='Payment'?-e.amount:0),0);
+export const permit=(v:Vendor)=>v.expires&&v.expires<new Date().toISOString().slice(0,10)?'Expired':v.status;

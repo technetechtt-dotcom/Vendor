@@ -1,0 +1,6 @@
+import { sqliteTable, text, integer, index } from 'drizzle-orm/sqlite-core';
+export const users = sqliteTable('users', {id:text('id').primaryKey(), name:text('name').notNull(), email:text('email').notNull().unique(), passwordHash:text('password_hash').notNull(), role:text('role').notNull(), active:integer('active').notNull().default(1), createdAt:text('created_at').notNull()});
+export const sessions = sqliteTable('sessions', {token:text('token').primaryKey(), userId:text('user_id').notNull(), expiresAt:text('expires_at').notNull(), createdAt:text('created_at').notNull()});
+export const hubs = sqliteTable('hubs', {id:text('id').primaryKey(), name:text('name').notNull().unique(), createdAt:text('created_at').notNull(), updatedAt:text('updated_at').notNull()});
+export const vendors = sqliteTable('vendors', {id:text('id').primaryKey(), payload:text('payload').notNull(), updatedAt:text('updated_at').notNull()});
+export const events = sqliteTable('events', {id:text('id').primaryKey(), vendorId:text('vendor_id').notNull().references(()=>vendors.id), kind:text('kind').notNull(), amount:integer('amount').notNull().default(0), note:text('note').notNull(), due:text('due').notNull().default(''), createdAt:text('created_at').notNull(), actor:text('actor').notNull(), resolved:integer('resolved').notNull().default(0)}, t=>[index('idx_events_vendor').on(t.vendorId)]);

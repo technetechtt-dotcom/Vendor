@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">LED Field Visits</string>
+    <string name="title_activity_main">LED Field Visits</string>
+    <string name="package_name">za.solplaatje.led.field</string>
+    <string name="custom_url_scheme">za.solplaatje.led.field</string>
+</resources>
