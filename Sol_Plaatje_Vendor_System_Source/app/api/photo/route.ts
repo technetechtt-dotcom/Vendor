@@ -32,7 +32,8 @@ async function handlePost(req: Request) {
   if (!(file instanceof File) || !types.includes(file.type) || file.size > 3 * 1024 * 1024) return denied(400, 'Use a JPG, PNG or WebP image under 3 MB.');
   const key = crypto.randomUUID();
   await bucket().put(key, await file.arrayBuffer(), {httpMetadata: {contentType: file.type}});
-  return Response.json({photo: '/api/photo?key=' + key});
+  await database().prepare('INSERT INTO attachments(key,kind,vendor_id,label,name,created_by,created_at) VALUES(?,?,?,?,?,?,?)').bind(key, 'photo', '', 'Profile picture', file.name.slice(0, 180), account.id, new Date().toISOString()).run();
+  return Response.json({photo: '/api/photo?key=' + key, key});
 }
 
 async function handleGet(req: Request) {

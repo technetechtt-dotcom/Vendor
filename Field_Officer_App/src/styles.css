@@ -14,7 +14,7 @@ h3{font-size:15px;font-weight:600;margin:22px 0 12px}
 .primary,.secondary{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 15px;border-radius:6px;font-size:14px;font-weight:500;min-height:40px}
 .primary{background:var(--green);color:white}
 .secondary{background:white;border:1px solid #dbe3dc;color:#52635a}
-.icon-button{background:transparent;display:grid;place-items:center;min-width:32px;height:32px;border-radius:6px;color:#d2dfc5}
+.icon-button{background:transparent;display:grid;place-items:center;min-width:44px;min-height:44px;border-radius:6px;color:#d2dfc5}
 .badge{font-size:12px;font-weight:500;padding:4px 8px;border-radius:4px;display:inline-block}
 .badge.good{background:#edf4e9;color:#608049}
 .badge.amber{background:#fbf1db;color:#a3864c}

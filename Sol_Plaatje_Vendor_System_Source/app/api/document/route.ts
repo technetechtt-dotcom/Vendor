@@ -26,6 +26,7 @@ async function handlePost(req: Request) {
   if (!(file instanceof File) || !types.includes(file.type) || file.size > 8 * 1024 * 1024) return denied(400, 'Use a PDF, JPG, PNG or WebP file under 8 MB.');
   const key = crypto.randomUUID();
   await bucket().put(key, await file.arrayBuffer(), {httpMetadata: {contentType: file.type}});
+  await database().prepare('INSERT INTO attachments(key,kind,vendor_id,label,name,created_by,created_at) VALUES(?,?,?,?,?,?,?)').bind(key, 'document', '', '', file.name.slice(0, 180), account.id, new Date().toISOString()).run();
   return Response.json({file: {id: key, label: '', name: file.name.slice(0, 180), url: '/api/document?key=' + key, contentType: file.type}});
 }
 

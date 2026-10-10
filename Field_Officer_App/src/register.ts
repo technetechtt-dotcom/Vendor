@@ -7,7 +7,8 @@ export type Vendor = {
 };
 export type Entry = {
   id: string; vendorId: string; kind: string; amount: number; note: string; due: string;
-  createdAt: string; actor: string; resolved: number;
+  createdAt: string; actor: string; resolved: number; snapshot?: string;
+  gpsLat?: string; gpsLng?: string; gpsAccuracy?: string; owner?: string; reversalOf?: string;
 };
 
 const STORAGE_KEY = 'solplaatje.field.registerBase';
@@ -21,7 +22,15 @@ let memoryToken = '';
 let memoryUser: FieldAccount | null = null;
 
 export const money = (cents: number) => new Intl.NumberFormat('en-ZA', {style: 'currency', currency: 'ZAR', maximumFractionDigits: 2}).format(cents / 100);
-export const balance = (id: string, events: Entry[]) => events.filter(event => event.vendorId === id).reduce((total, event) => total + (event.kind === 'Charge' ? event.amount : event.kind === 'Payment' ? -event.amount : 0), 0);
+export const balance = (id: string, events: Entry[]) => events.filter(event => event.vendorId === id).reduce((total, event) => {
+  if (event.kind === 'Charge') return total + event.amount;
+  if (event.kind === 'Payment') return total - event.amount;
+  if (event.kind === 'Reversal') {
+    const original = events.find(item => item.id === event.reversalOf);
+    return total + (original?.kind === 'Charge' ? -event.amount : event.amount);
+  }
+  return total;
+}, 0);
 export const permit = (vendor: Vendor) => vendor.expires && vendor.expires < new Date().toISOString().slice(0, 10) ? 'Expired' : vendor.status;
 
 export function getRegisterBase() {
@@ -128,12 +137,49 @@ export async function openProtected(path: string) {
   const response = await fetch(base + path, {cache: 'no-store', headers: authHeaders()});
   if (!response.ok) throw new Error('Could not open this file.');
   const blob = await response.blob();
+  const filename = /filename="([^"]+)"/.exec(response.headers.get('Content-Disposition') || '')?.[1] || 'document';
+  await saveBlob(blob, filename);
+}
+
+async function saveBlob(blob: Blob, filename: string) {
+  const file = new File([blob], filename, {type: blob.type || 'application/octet-stream'});
+  const native = (globalThis as {Capacitor?: {isNativePlatform?: () => boolean}}).Capacitor?.isNativePlatform?.();
+  if (native) {
+    const [{Filesystem, Directory}, {Share}] = await Promise.all([import('@capacitor/filesystem'), import('@capacitor/share')]);
+    const data = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+    const written = await Filesystem.writeFile({path: filename, data, directory: Directory.Cache});
+    await Share.share({title: filename, url: written.uri, dialogTitle: 'Share notice'});
+    return;
+  }
+  if (navigator.share && navigator.canShare?.({files: [file]})) {
+    await navigator.share({files: [file], title: filename});
+    return;
+  }
   const url = URL.createObjectURL(blob);
-  window.open(url);
-  return url;
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function noticeVendor(vendor: Vendor, entry: Entry): Vendor {
+  if (!entry.snapshot) return vendor;
+  try {
+    const snap = JSON.parse(entry.snapshot) as Partial<Vendor>;
+    return {...vendor, ...snap, id: vendor.id};
+  } catch {
+    return vendor;
+  }
 }
 
 export function noticeText(vendor: Vendor, entry: Entry) {
+  vendor = noticeVendor(vendor, entry);
   return [
     'SOL PLAATJE MUNICIPALITY',
     'LOCAL ECONOMIC DEVELOPMENT OFFICE',

@@ -1,6 +1,6 @@
 import {useEffect, useRef, useState} from 'react';
-import {ScanLine, Search, X, MapPin, ShieldCheck, Wallet, ChevronLeft, Camera, Check, LocateFixed, Wifi, Building2, ClipboardCheck, Loader2, Mail, Copy, LogOut} from 'lucide-react';
-import {Vendor, Entry, Delivery, money, balance, permit, getRegisterBase, saveRegisterBase, getToken, saveSession, clearSession, authHeaders, noticeEmail, noticeText, hydrateSession, openProtected, FieldAccount} from './register';
+import {ScanLine, Search, X, MapPin, ShieldCheck, Wallet, ChevronLeft, Camera, Check, LocateFixed, Wifi, Building2, ClipboardCheck, Loader2, Mail, LogOut} from 'lucide-react';
+import {Vendor, Entry, Delivery, money, balance, permit, getRegisterBase, saveRegisterBase, getToken, getSession, saveSession, clearSession, authHeaders, noticeEmail, noticeText, hydrateSession, openProtected, FieldAccount} from './register';
 
 type VisitGPS = {lat: number; lng: number; accuracy: number};
 
@@ -31,6 +31,38 @@ export function App() {
   const video = useRef<HTMLVideoElement | null>(null);
   const visitKey = useRef('');
   const [portrait, setPortrait] = useState('');
+  const [senderConnected, setSenderConnected] = useState(false);
+  const [noticeBusy, setNoticeBusy] = useState('');
+  const [queued, setQueued] = useState(0);
+  const activeVendor = useRef('');
+  const noticeLock = useRef('');
+
+  function readDrafts() {
+    try { return JSON.parse(localStorage.getItem('solplaatje.field.visitDrafts') || '{}'); } catch { return {}; }
+  }
+  function stashDraft(vendorId?: string) {
+    if (!vendorId) return;
+    const drafts = readDrafts();
+    if (!note.trim() && !due && !gps) delete drafts[vendorId];
+    else drafts[vendorId] = {note, due, kind, gps, key: visitKey.current || crypto.randomUUID()};
+    localStorage.setItem('solplaatje.field.visitDrafts', JSON.stringify(drafts));
+  }
+  function restoreDraft(vendorId: string) {
+    const draft = readDrafts()[vendorId];
+    setNote(draft?.note || '');
+    setDue(draft?.due || '');
+    setKind(draft?.kind || 'Inspection');
+    setGPS(draft?.gps || null);
+    visitKey.current = draft?.key || '';
+    setVisit(Boolean(draft?.note || draft?.due || draft?.gps));
+  }
+  function readQueue() {
+    try { return JSON.parse(localStorage.getItem('solplaatje.field.visitQueue') || '[]'); } catch { return []; }
+  }
+  function writeQueue(items: unknown[]) {
+    localStorage.setItem('solplaatje.field.visitQueue', JSON.stringify(items));
+    setQueued(items.length);
+  }
 
   function requireServer() {
     const base = getRegisterBase();
@@ -68,11 +100,14 @@ export function App() {
       const body = await response.json();
       if (response.status === 401) { clearSession(); setSession(null); }
       if (!response.ok) throw new Error(body.error || 'Unable to load this vendor');
+      if (activeVendor.current && activeVendor.current !== body.vendor.id) stashDraft(activeVendor.current);
+      activeVendor.current = body.vendor.id;
       setVendor(body.vendor);
       setEvents(body.events);
       setDeliveries(Array.isArray(body.deliveries) ? body.deliveries : []);
+      setSenderConnected(Boolean(body.senderConnected));
       setTab('Profile');
-      setVisit(false);
+      restoreDraft(body.vendor.id);
     } catch (cause) {
       setVendor(null);
       setError(cause instanceof Error ? cause.message : 'Could not load the vendor. Check the register address and your connection.');
@@ -90,6 +125,34 @@ export function App() {
     setEvents(body.events);
     setDeliveries(Array.isArray(body.deliveries) ? body.deliveries : []);
   }
+
+  useEffect(() => {
+    if (!vendor) return;
+    stashDraft(vendor.id);
+  }, [vendor?.id, note, due, kind, gps]);
+
+  useEffect(() => {
+    const flush = async () => {
+      const base = getRegisterBase();
+      if (!base || !getToken()) return;
+      let queue = readQueue();
+      const remaining = [];
+      for (const item of queue) {
+        try {
+          const response = await fetch(`${base}/api/register`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify(item)});
+          if (!response.ok && response.status !== 400) remaining.push(item);
+        } catch {
+          remaining.push(item);
+        }
+      }
+      writeQueue(remaining);
+      if (queue.length && !remaining.length) setNotice('Queued visits were sent to the register.');
+    };
+    setQueued(readQueue().length);
+    flush();
+    window.addEventListener('online', flush);
+    return () => window.removeEventListener('online', flush);
+  }, [session?.id]);
 
   useEffect(() => {
     if (!scanning) return;
@@ -142,11 +205,12 @@ export function App() {
     const details = note.trim() + (gps
       ? `\nVisit GPS: ${gps.lat.toFixed(6)}, ${gps.lng.toFixed(6)}; device accuracy approximately ${Math.round(gps.accuracy)} m. This is the visit position, not a change to the registered pitch.`
       : '\nVisit GPS not captured.');
+    const payload = {action: 'event', vendorId: vendor.id, kind, note: details, due, amount: 0, idempotencyKey: visitKey.current, gpsLat: gps ? String(gps.lat) : '', gpsLng: gps ? String(gps.lng) : '', gpsAccuracy: gps ? String(Math.round(gps.accuracy)) : ''};
     try {
       const response = await fetch(`${base}/api/register`, {
         method: 'POST',
         headers: authHeaders(true),
-        body: JSON.stringify({action: 'event', vendorId: vendor.id, kind, note: details, due, amount: 0, idempotencyKey: visitKey.current}),
+        body: JSON.stringify(payload),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error);
@@ -156,6 +220,9 @@ export function App() {
         if (next.ok) { setEvents(nextBody.events); setDeliveries(Array.isArray(nextBody.deliveries) ? nextBody.deliveries : []); }
       } catch { /* The write succeeded; do not offer a duplicate submission. */ }
       visitKey.current = '';
+      const drafts = readDrafts();
+      delete drafts[vendor.id];
+      localStorage.setItem('solplaatje.field.visitDrafts', JSON.stringify(drafts));
       setVisit(false);
       setNote('');
       setDue('');
@@ -163,9 +230,43 @@ export function App() {
       setNotice('Visit saved to the vendor register.');
       setTab('Compliance');
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not save. Your notes remain here; reconnect and try again.');
+      if (cause instanceof TypeError) {
+        const queue = readQueue();
+        if (!queue.some((item: {idempotencyKey?: string}) => item.idempotencyKey === payload.idempotencyKey)) queue.push(payload);
+        writeQueue(queue);
+        const drafts = readDrafts();
+        delete drafts[vendor.id];
+        localStorage.setItem('solplaatje.field.visitDrafts', JSON.stringify(drafts));
+        visitKey.current = '';
+        setVisit(false);
+        setNote('');
+        setDue('');
+        setGPS(null);
+        setNotice('Saved on this phone. It will be sent when the register can be reached. The same visit will not be saved twice.');
+      } else setError(cause instanceof Error ? cause.message : 'Could not save. Your notes remain here; reconnect and try again.');
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function postNotice(eventId: string, action: string, extra: Record<string, string> = {}) {
+    if (noticeLock.current || !vendor) return;
+    const base = getRegisterBase();
+    if (!base) return;
+    noticeLock.current = eventId;
+    setNoticeBusy(eventId);
+    setError('');
+    try {
+      const response = await fetch(`${base}/api/notice`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify({action, eventId, idempotencyKey: crypto.randomUUID().replace(/-/g, '').slice(0, 24), ...extra})});
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Could not record this notice.');
+      await refreshRecord(vendor.id);
+      setNotice(body.message || 'Notice record saved.');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not record this notice.');
+    } finally {
+      noticeLock.current = '';
+      setNoticeBusy('');
     }
   }
 
@@ -202,15 +303,27 @@ export function App() {
       }
       try {
         const response = await fetch(`${base}/api/auth`, {headers: authHeaders(), cache: 'no-store'});
-        const body = await response.json();
-        if (!response.ok || !body.user) throw new Error(body.error || 'Sign in again.');
-        if (!cancelled) {
+        const body = await response.json().catch(() => ({}));
+        if (response.status === 401 || response.status === 403 || (response.ok && !body.user)) {
+          clearSession();
+          if (!cancelled) setSession(null);
+        } else if (!response.ok) {
+          if (!cancelled) {
+            setSession(getSession());
+            setError('The vendor register is unavailable. Your sign-in is still on this device.');
+          }
+        } else if (!cancelled) {
           setSession(body.user);
           saveSession(token, body.user);
         }
       } catch {
-        clearSession();
-        if (!cancelled) setSession(null);
+        if (!cancelled) {
+          const cached = getSession();
+          if (cached) {
+            setSession(cached);
+            setError('The vendor register could not be reached. Your sign-in is still on this device.');
+          } else setSession(null);
+        }
       } finally {
         if (!cancelled) setAuthReady(true);
       }
@@ -360,7 +473,8 @@ export function App() {
           </>
         ) : (
           <>
-            <button className="field-back" onClick={() => { setVendor(null); setVisit(false); setError(''); setNotice(''); }}><ChevronLeft size={17} />Scan another card</button>
+            <button className="field-back" onClick={() => { stashDraft(vendor.id); activeVendor.current = ''; setVendor(null); setVisit(false); setNote(''); setDue(''); setGPS(null); visitKey.current = ''; setError(''); setNotice(''); }}><ChevronLeft size={17} />Scan another card</button>
+            {queued > 0 && <p className="field-help">{queued} visit{queued === 1 ? '' : 's'} saved on this phone, waiting to send.</p>}
             <div className="field-vendor-head">
               {portrait ? <img src={portrait} alt={'Profile picture of ' + vendor.name} /> : <span>{vendor.name.split(' ').slice(0, 2).map(part => part[0]).join('')}</span>}
               <div><p className="mono">{vendor.id}</p><h1>{vendor.business}</h1><p>{vendor.name}</p></div>
@@ -419,13 +533,15 @@ export function App() {
                     {['Warning', 'Violation'].includes(entry.kind) && (
                       <>
                         <div className="notice-actions">
-                          <a href={noticeEmail(vendor, entry)} onClick={() => fetch(`${getRegisterBase()}/api/notice`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify({action: 'deliver', eventId: entry.id, method: 'draft'})}).catch(() => {})}><Mail size={16} />Email draft</a>
-                          <button type="button" onClick={async () => { try { await openProtected('/api/notice?eventId=' + encodeURIComponent(entry.id)); await refreshRecord(vendor.id); setNotice('PDF downloaded. The download is recorded on this notice.'); } catch { setError('Could not download the notice.'); } }}><Copy size={16} />Download PDF</button>
-                          <button type="button" onClick={async () => { try { await navigator.clipboard.writeText(noticeText(vendor, entry)); setNotice('Notice copied. Paste it into your official email.'); } catch { setError('Copy unavailable. Use the email draft or PDF.'); } }}><Copy size={16} />Copy notice</button>
-                          <button type="button" onClick={() => fetch(`${getRegisterBase()}/api/notice`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify({action: 'deliver', eventId: entry.id, method: 'handover'})}).then(async response => { const body = await response.json(); if (!response.ok) throw new Error(body.error); await refreshRecord(vendor.id); setNotice(body.message); }).catch(cause => setError(cause instanceof Error ? cause.message : 'Could not record handover.'))}>Handed to trader</button>
-                          <button type="button" onClick={() => { const reason = window.prompt('Why is this case being escalated?'); if (!reason || !reason.trim()) return; fetch(`${getRegisterBase()}/api/notice`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify({action: 'escalate', eventId: entry.id, note: reason.trim()})}).then(async response => { const body = await response.json(); if (!response.ok) throw new Error(body.error); setNotice(body.message); lookup(vendor.id); }).catch(cause => setError(cause instanceof Error ? cause.message : 'Could not record the escalation.')); }}>Escalate</button>
+                          <a href={noticeEmail(vendor, entry)} onClick={() => postNotice(entry.id, 'deliver', {method: 'draft'})}><Mail size={16} />Email draft</a>
+                          <button type="button" disabled={noticeBusy === entry.id} onClick={async () => { setNoticeBusy(entry.id); try { await openProtected('/api/notice?eventId=' + encodeURIComponent(entry.id)); await refreshRecord(vendor.id); setNotice('PDF saved. Use the share sheet on Android, or the download on this browser. The download is recorded.'); } catch { setError('Could not save the notice.'); } finally { setNoticeBusy(''); } }}>Download or share PDF</button>
+                          <button type="button" disabled={noticeBusy === entry.id} onClick={async () => { try { await navigator.clipboard.writeText(noticeText(vendor, entry)); setNotice('Notice copied. Paste it into your official email.'); } catch { setError('Copy unavailable. Use the email draft or PDF.'); } }}>Copy notice</button>
+                          <button type="button" disabled={noticeBusy === entry.id} onClick={() => postNotice(entry.id, 'deliver', {method: 'handover'})}>Handed to trader</button>
+                          <button type="button" disabled={noticeBusy === entry.id} onClick={() => postNotice(entry.id, 'deliver', {method: 'acknowledged'})}>Trader acknowledged</button>
+                          <button type="button" disabled={noticeBusy === entry.id || !senderConnected} onClick={() => postNotice(entry.id, 'send')}>{senderConnected ? 'Municipal sender' : 'Municipal sender not connected'}</button>
+                          {!entry.resolved && <button type="button" disabled={noticeBusy === entry.id} onClick={() => { const reason = window.prompt('Why is this case being escalated?'); if (!reason || !reason.trim()) return; const destination = window.prompt('Where should this case go?', 'LED Office') || 'LED Office'; postNotice(entry.id, 'escalate', {note: reason.trim(), destination}); }}>Escalate</button>}
                         </div>
-                        <p className="notice-help">The email draft is a fallback and is not marked as sent. Download the PDF or record that it was handed to the trader.</p>
+                        <p className="notice-help">{senderConnected ? 'Municipal email can accept this notice. Acceptance is not proof the trader opened it.' : 'Municipal email is not connected. Use the PDF, handover or acknowledgement.'} The email draft is not marked as sent.</p>
                         {deliveries.filter(item => item.eventId === entry.id).map(item => <small className="notice-log" key={item.id}>{date(item.createdAt)} · {item.method} · {item.status} · {item.actor}</small>)}
                       </>
                     )}
