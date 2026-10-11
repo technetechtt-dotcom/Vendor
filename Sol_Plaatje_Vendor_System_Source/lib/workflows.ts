@@ -52,20 +52,98 @@ export async function officeBundle(db: Sql) {
   };
 }
 
-export async function allocationPlan(db: Sql, vendor: any, hubId: string, actor: string, stamp: string) {
+export function parseCsv(csv: string) {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoted = false;
+  for (let i = 0; i < csv.length; i++) {
+    const char = csv[i];
+    if (quoted) {
+      if (char === '"') {
+        if (csv[i + 1] === '"') { cell += '"'; i++; }
+        else quoted = false;
+      } else cell += char;
+    } else if (char === '"') quoted = true;
+    else if (char === ',') { row.push(cell.trim()); cell = ''; }
+    else if (char === '\n' || char === '\r') {
+      if (char === '\r' && csv[i + 1] === '\n') i++;
+      row.push(cell.trim());
+      if (row.some(Boolean)) rows.push(row);
+      row = [];
+      cell = '';
+    } else cell += char;
+  }
+  if (cell || row.length) {
+    row.push(cell.trim());
+    if (row.some(Boolean)) rows.push(row);
+  }
+  return rows;
+}
+
+export function validateVendorShape(v: any) {
+  if (!v || typeof v.name !== 'string' || !v.name.trim() || typeof v.business !== 'string' || !v.business.trim() || !['Formal', 'Informal'].includes(v.type) || !['Approved', 'Pending review', 'Suspended'].includes(v.status)) throw new Error('Please complete the vendor name, business and registration details.');
+  for (const key of ['name', 'business', 'sector', 'hub', 'unit', 'address', 'lat', 'lng', 'phone', 'email', 'issued', 'expires', 'status', 'photo']) if (typeof v[key] !== 'string' || v[key].length > 500) throw new Error('One or more fields are invalid.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v.issued) || !/^\d{4}-\d{2}-\d{2}$/.test(v.expires) || v.expires < v.issued) throw new Error('Enter valid permit dates; expiry must follow issue date.');
+  if (v.type === 'Informal' && (!String(v.lat).trim() || !String(v.lng).trim() || !Number.isFinite(Number(v.lat)) || !Number.isFinite(Number(v.lng)) || Math.abs(Number(v.lat)) > 90 || Math.abs(Number(v.lng)) > 180)) throw new Error('Enter valid GPS coordinates for the informal trader.');
+  if (v.type === 'Formal' && (!String(v.hub).trim() || !String(v.unit).trim())) throw new Error('Select a hub and enter the allocated unit.');
+  if (!Array.isArray(v.documents) || v.documents.some((item: unknown) => typeof item !== 'string' || item.length > 80)) throw new Error('Invalid document checklist.');
+  if (!Array.isArray(v.files)) v.files = [];
+  if (v.files.length > 12 || v.files.some((file: any) => !file || typeof file.id !== 'string' || typeof file.label !== 'string' || typeof file.name !== 'string' || typeof file.url !== 'string' || file.label.length > 80 || file.name.length > 180 || file.url !== '/api/document?key=' + file.id || !/^[a-f0-9-]{36}$/.test(file.id))) throw new Error('One or more verification documents are invalid.');
+}
+
+function claimExists(gate?: {id: string; note: string}) {
+  return gate ? "EXISTS (SELECT 1 FROM import_rows WHERE id=? AND status='approved' AND note=?)" : '';
+}
+
+export async function allocationPlan(db: Sql, vendor: any, hubId: string, actor: string, stamp: string, gate?: {id: string; note: string}) {
   const previous = await db.prepare('SELECT hub,unit,hub_id AS hubId FROM allocations WHERE vendor_id=?').bind(vendor.id).first<any>();
-  const statements: SqlStatement[] = [db.prepare('DELETE FROM allocations WHERE vendor_id=?').bind(vendor.id)];
+  const claim = claimExists(gate);
+  const claimArgs = gate ? [gate.id, gate.note] : [];
+  const available = `NOT EXISTS (SELECT 1 FROM hub_units WHERE hub_id=? AND unit_code=? AND status IN ('reserved','unavailable'))`;
+  if (vendor.type === 'Formal') {
+    const unit = await db.prepare('SELECT status FROM hub_units WHERE hub_id=? AND unit_code=?').bind(hubId, vendor.unit).first<{status: string}>();
+    const holder = await db.prepare('SELECT vendor_id FROM allocations WHERE (hub_id=? OR hub=?) AND unit=?').bind(hubId, vendor.hub, vendor.unit).first<{vendor_id: string}>();
+    const keeping = previous && previous.unit === vendor.unit && (previous.hubId === hubId || previous.hub === vendor.hub);
+    if (holder && holder.vendor_id !== vendor.id) throw new Error('This hub unit is already allocated to another vendor.');
+    if (unit && ['reserved', 'unavailable'].includes(unit.status) && !keeping) throw new Error('This unit is ' + unit.status + ' and cannot be allocated.');
+    if (unit && unit.status === 'occupied' && !keeping && holder && holder.vendor_id !== vendor.id) throw new Error('This unit is already occupied.');
+  }
+  const statements: SqlStatement[] = [db.prepare('DELETE FROM allocations WHERE vendor_id=?' + (claim ? ' AND ' + claim : '')).bind(vendor.id, ...claimArgs)];
   const changed = !previous || vendor.type !== 'Formal' || previous.unit !== vendor.unit || previous.hub !== vendor.hub;
   if (previous && changed) {
-    statements.push(db.prepare("UPDATE hub_units SET status='available' WHERE hub_id=? AND unit_code=? AND status='occupied'").bind(previous.hubId || '', previous.unit));
-    statements.push(db.prepare('INSERT INTO allocation_history(id,hub_id,unit_code,vendor_id,action,actor,created_at,note) VALUES(?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(), previous.hubId || '', previous.unit, vendor.id, 'released', actor, stamp, 'Allocation released'));
+    statements.push(db.prepare("UPDATE hub_units SET status='available' WHERE hub_id=? AND unit_code=? AND status='occupied'" + (claim ? ' AND ' + claim : '')).bind(previous.hubId || '', previous.unit, ...claimArgs));
+    statements.push(db.prepare('INSERT INTO allocation_history(id,hub_id,unit_code,vendor_id,action,actor,created_at,note) ' + (claim ? 'SELECT ?,?,?,?,?,?,?,? WHERE ' + claim : 'VALUES(?,?,?,?,?,?,?,?)')).bind(crypto.randomUUID(), previous.hubId || '', previous.unit, vendor.id, 'released', actor, stamp, 'Allocation released', ...claimArgs));
   }
   if (vendor.type === 'Formal') {
-    statements.push(db.prepare('INSERT INTO allocations(hub,unit,vendor_id,hub_id) VALUES(?,?,?,?)').bind(vendor.hub, vendor.unit, vendor.id, hubId));
-    statements.push(db.prepare("INSERT INTO hub_units(id,hub_id,unit_code,capacity,status,notes) VALUES(?,?,?,1,'occupied','') ON CONFLICT(hub_id,unit_code) DO UPDATE SET status='occupied'").bind(crypto.randomUUID(), hubId, vendor.unit));
-    if (changed) statements.push(db.prepare('INSERT INTO allocation_history(id,hub_id,unit_code,vendor_id,action,actor,created_at,note) VALUES(?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(), hubId, vendor.unit, vendor.id, previous ? 'transferred' : 'allocated', actor, stamp, previous ? `From ${previous.hub} ${previous.unit}` : 'Allocated'));
+    statements.push(db.prepare('INSERT INTO allocations(hub,unit,vendor_id,hub_id) SELECT ?,?,?,? WHERE ' + (claim ? claim + ' AND ' : '') + available).bind(vendor.hub, vendor.unit, vendor.id, hubId, ...claimArgs, hubId, vendor.unit));
+    statements.push(db.prepare("INSERT INTO hub_units(id,hub_id,unit_code,capacity,status,notes) SELECT ?,?,?,1,'occupied','' WHERE " + (claim ? claim + ' AND ' : '') + available + " ON CONFLICT(hub_id,unit_code) DO UPDATE SET status='occupied' WHERE hub_units.status NOT IN ('reserved','unavailable')").bind(crypto.randomUUID(), hubId, vendor.unit, ...claimArgs, hubId, vendor.unit));
+    if (changed) statements.push(db.prepare('INSERT INTO allocation_history(id,hub_id,unit_code,vendor_id,action,actor,created_at,note) ' + (claim ? 'SELECT ?,?,?,?,?,?,?,? WHERE ' + claim : 'VALUES(?,?,?,?,?,?,?,?)')).bind(crypto.randomUUID(), hubId, vendor.unit, vendor.id, previous ? 'transferred' : 'allocated', actor, stamp, previous ? 'From ' + previous.hub + ' ' + previous.unit : 'Allocated', ...claimArgs));
   }
   return statements;
+}
+
+export async function renameHub(db: Sql, id: string, name: string, previousName: string, actor: string, stamp: string) {
+  const rows = await db.prepare('SELECT id,payload FROM vendors').all<any>();
+  const updates: SqlStatement[] = [];
+  for (const row of rows.results) {
+    const vendor = JSON.parse(row.payload);
+    if (vendor.hub !== previousName) continue;
+    vendor.hub = name;
+    updates.push(db.prepare('UPDATE vendors SET payload=?,updated_at=? WHERE id=?').bind(JSON.stringify(vendor), stamp, row.id));
+  }
+  await db.batch([
+    db.prepare('UPDATE hubs SET name=?,updated_at=? WHERE id=?').bind(name, stamp, id),
+    db.prepare('UPDATE allocations SET hub=?,hub_id=? WHERE hub_id=? OR hub=?').bind(name, id, id, previousName),
+    ...updates,
+    db.prepare('INSERT INTO audit_log(id,entity,entity_id,action,before_json,after_json,actor,created_at) VALUES(?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(), 'hub', id, 'renamed', JSON.stringify(previousName).slice(0, 4000), JSON.stringify(name).slice(0, 4000), actor, stamp),
+  ]);
+}
+
+export async function auditPage(db: Sql, offset: number) {
+  const start = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
+  const rows = await db.prepare('SELECT id,entity,entity_id AS entityId,action,before_json AS beforeJson,after_json AS afterJson,actor,created_at AS createdAt FROM audit_log ORDER BY created_at DESC LIMIT 50 OFFSET ?').bind(start).all<any>();
+  return {audit: rows.results, hasMore: rows.results.length === 50};
 }
 
 export async function claimAttachments(db: Sql, vendorId: string, keys: string[]) {
@@ -119,9 +197,24 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     const id = text(body.id, 80) || crypto.randomUUID();
     const existing = await db.prepare('SELECT id FROM pitches WHERE id=?').bind(id).first();
     const values = [text(body.vendorId, 40), pitchCode, text(body.ward, 80), text(body.area, 160), text(body.activity, 120), lat, lng, text(body.accuracy, 40), text(body.verifiedAt, 30)];
-    if (existing) await db.prepare('UPDATE pitches SET vendor_id=?,pitch_code=?,ward=?,area=?,activity=?,lat=?,lng=?,accuracy=?,verified_at=? WHERE id=?').bind(...values, id).run();
-    else await db.prepare('INSERT INTO pitches(vendor_id,pitch_code,ward,area,activity,lat,lng,accuracy,verified_at,id) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(...values, id).run();
-    await writeAudit(db, 'pitch', id, 'saved', null, {pitchCode, area: values[3]}, actor, stamp);
+    const statements: SqlStatement[] = [existing
+      ? db.prepare('UPDATE pitches SET vendor_id=?,pitch_code=?,ward=?,area=?,activity=?,lat=?,lng=?,accuracy=?,verified_at=? WHERE id=?').bind(...values, id)
+      : db.prepare('INSERT INTO pitches(vendor_id,pitch_code,ward,area,activity,lat,lng,accuracy,verified_at,id) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(...values, id)];
+    const vendorId = text(body.vendorId, 40);
+    let beforeLocation: unknown = null;
+    if (vendorId && Number.isFinite(Number(lat)) && Number.isFinite(Number(lng)) && lat && lng) {
+      const vendorRow = await db.prepare('SELECT payload FROM vendors WHERE id=?').bind(vendorId).first<{payload: string}>();
+      if (vendorRow) {
+        const vendor = JSON.parse(vendorRow.payload);
+        beforeLocation = {lat: vendor.lat, lng: vendor.lng, address: vendor.address};
+        vendor.lat = lat;
+        vendor.lng = lng;
+        if (values[3]) vendor.address = values[3];
+        statements.push(db.prepare('UPDATE vendors SET payload=?,updated_at=? WHERE id=?').bind(JSON.stringify(vendor), stamp, vendorId));
+      }
+    }
+    statements.push(db.prepare('INSERT INTO audit_log(id,entity,entity_id,action,before_json,after_json,actor,created_at) VALUES(?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(), 'pitch', id, 'saved', JSON.stringify(beforeLocation ?? '').slice(0, 4000), JSON.stringify({pitchCode, area: values[3], lat, lng}).slice(0, 4000), actor, stamp));
+    await db.batch(statements);
     return {ok: true};
   }
   if (body.action === 'tariff') {
@@ -161,7 +254,7 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
       .bind(id, vendor.id, vendor.id, serial, status, note, actor, stamp).run();
     await db.prepare('INSERT INTO events(id,vendor_id,kind,amount,note,due,created_at,actor,resolved) VALUES(?,?,?,?,?,?,?,?,0)')
       .bind(crypto.randomUUID(), vendor.id, 'Permit', 0, status + ': ' + note, '', stamp, actor).run();
-    await writeAudit(db, 'permit', vendor.id, status, null, {serial, expires: vendor.expires}, actor, stamp);
+    await writeAudit(db, 'permit', vendor.id, status, {status: JSON.parse(row.payload).status, expires: JSON.parse(row.payload).expires}, {serial, expires: vendor.expires, status: vendor.status}, actor, stamp);
     return {ok: true};
   }
   if (body.action === 'requirement') {
@@ -180,10 +273,10 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     const severity = text(body.severity, 20);
     if (!owner) throw new Error('Enter who owns the follow-up.');
     if (severity && !['Low', 'Medium', 'High'].includes(severity)) throw new Error('Choose a severity.');
-    const open = await db.prepare("SELECT id FROM events WHERE id=? AND kind IN ('Warning','Violation','Inspection') AND resolved=0").bind(id).first();
+    const open = await db.prepare("SELECT id,owner,severity,case_status FROM events WHERE id=? AND kind IN ('Warning','Violation','Inspection') AND resolved=0").bind(id).first<any>();
     if (!open) throw new Error('That case is no longer open.');
     await db.prepare("UPDATE events SET owner=?,severity=?,case_status='open' WHERE id=?").bind(owner, severity, id).run();
-    await writeAudit(db, 'case', id, 'assigned', null, {owner, severity}, actor, stamp);
+    await writeAudit(db, 'case', id, 'assigned', {owner: open.owner, severity: open.severity, caseStatus: open.case_status}, {owner, severity}, actor, stamp);
     return {ok: true};
   }
   if (body.action === 'reconcile') {
@@ -203,10 +296,25 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     const already = await db.prepare('SELECT id FROM events WHERE reversal_of=?').bind(id).first();
     if (already) throw new Error('This entry has already been reversed.');
     const reversalId = crypto.randomUUID();
-    await db.prepare('INSERT INTO events(id,vendor_id,kind,amount,note,due,created_at,actor,resolved,reversal_of,cashier) VALUES(?,?,?,?,?,?,?,?,0,?,?)')
-      .bind(reversalId, original.vendor_id, 'Reversal', original.amount, 'Reversal of ' + original.kind + ' ' + original.id + ': ' + note, '', stamp, actor, original.id, actor).run();
-    await writeAudit(db, 'payment', original.id, 'reversed', null, {reversalId}, actor, stamp);
+    try {
+      await db.prepare('INSERT INTO events(id,vendor_id,kind,amount,note,due,created_at,actor,resolved,reversal_of,cashier) VALUES(?,?,?,?,?,?,?,?,0,?,?)')
+        .bind(reversalId, original.vendor_id, 'Reversal', original.amount, 'Reversal of ' + original.kind + ' ' + original.id + ': ' + note, '', stamp, actor, original.id, actor).run();
+    } catch (error) {
+      if (/UNIQUE/i.test(String(error))) throw new Error('This entry has already been reversed.');
+      throw error;
+    }
+    await writeAudit(db, 'payment', original.id, 'reversed', {kind: original.kind, amount: original.amount}, {reversalId}, actor, stamp);
     return {ok: true, id: reversalId};
+  }
+  if (body.action === 'transition') {
+    const id = text(body.id, 80);
+    const caseStatus = text(body.caseStatus, 20);
+    if (!['open', 'follow-up', 'escalated'].includes(caseStatus)) throw new Error('Choose open, follow-up or escalated. Resolution is recorded on the case.');
+    const row = await db.prepare("SELECT id,case_status FROM events WHERE id=? AND kind IN ('Warning','Violation') AND resolved=0").bind(id).first<any>();
+    if (!row) throw new Error('That case is no longer open.');
+    await db.prepare('UPDATE events SET case_status=? WHERE id=? AND resolved=0').bind(caseStatus, id).run();
+    await writeAudit(db, 'case', id, 'transition', {caseStatus: row.case_status}, {caseStatus}, actor, stamp);
+    return {ok: true};
   }
   if (body.action === 'settings') {
     const documentNote = text(body.documentNote, 1000);
@@ -217,13 +325,13 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
   if (body.action === 'import') {
     const csv = String(body.csv || '');
     if (csv.length < 5 || csv.length > 200000) throw new Error('Paste the legacy rows to review.');
-    const lines = csv.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-    const headers = lines.shift()?.split(',').map(cell => cell.trim().toLowerCase()) || [];
+    const table = parseCsv(csv);
+    const headers = (table.shift() || []).map(cell => cell.trim().toLowerCase());
     const required = ['name', 'business', 'type'];
     if (required.some(column => !headers.includes(column))) throw new Error('The first row must include name, business and type.');
     const batch = crypto.randomUUID();
-    for (const line of lines.slice(0, 300)) {
-      const cells = line.split(',').map(cell => cell.trim().replace(/^"|"$/g, ''));
+    const lines = table.slice(0, 300);
+    for (const cells of lines) {
       const record: Record<string, string> = {};
       headers.forEach((header, index) => { record[header] = cells[index] || ''; });
       let status = 'pending';
@@ -250,17 +358,30 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
       address: record.address || '', lat: record.lat || '', lng: record.lng || '', phone: record.phone || '', email: record.email || '',
       issued: record.issued || stamp.slice(0, 10), expires: record.expires || stamp.slice(0, 10), status: 'Pending review', documents: [], files: [], photo: '', sample: false,
     };
+    validateVendorShape(vendor);
+    let hubId = '';
     if (vendor.type === 'Formal') {
       const hub = await db.prepare('SELECT id FROM hubs WHERE name=?').bind(vendor.hub).first<{id: string}>();
-      if (!hub || !vendor.unit) throw new Error('The formal row needs a known hub and unit.');
-      const plan = await allocationPlan(db, vendor, hub.id, actor, stamp);
-      await db.batch([db.prepare('INSERT INTO vendors(id,payload,updated_at) VALUES(?,?,?)').bind(vendor.id, JSON.stringify(vendor), stamp), ...plan]);
-    } else {
-      await db.prepare('INSERT INTO vendors(id,payload,updated_at) VALUES(?,?,?)').bind(vendor.id, JSON.stringify(vendor), stamp).run();
-      if (vendor.unit || vendor.address) await db.prepare('INSERT INTO pitches(id,vendor_id,pitch_code,ward,area,activity,lat,lng,accuracy,verified_at) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(), vendor.id, vendor.unit, '', vendor.address, vendor.sector, vendor.lat, vendor.lng, '', '').run();
+      if (!hub) throw new Error('The formal row needs a known hub and unit.');
+      hubId = hub.id;
     }
-    await db.prepare("UPDATE import_rows SET status='approved', note=? WHERE id=?").bind('Imported as ' + vendor.id, id).run();
-    await writeAudit(db, 'import', id, 'approved', null, {vendorId: vendor.id}, actor, stamp);
+    const note = 'Imported as ' + vendor.id;
+    const gate = {id, note};
+    const plan = vendor.type === 'Formal' ? await allocationPlan(db, vendor, hubId, actor, stamp, gate) : [];
+    const claim = "EXISTS (SELECT 1 FROM import_rows WHERE id=? AND status='approved' AND note=?)";
+    const statements: SqlStatement[] = [
+      db.prepare("UPDATE import_rows SET status='approved', note=? WHERE id=? AND status='pending'").bind(note, id),
+      db.prepare('INSERT INTO vendors(id,payload,updated_at) SELECT ?,?,? WHERE ' + claim).bind(vendor.id, JSON.stringify(vendor), stamp, id, note),
+      ...plan,
+    ];
+    if (vendor.type === 'Informal' && (vendor.unit || vendor.address)) statements.push(db.prepare('INSERT INTO pitches(id,vendor_id,pitch_code,ward,area,activity,lat,lng,accuracy,verified_at) SELECT ?,?,?,?,?,?,?,?,?,? WHERE ' + claim).bind(crypto.randomUUID(), vendor.id, vendor.unit, '', vendor.address, vendor.sector, vendor.lat, vendor.lng, '', '', id, note));
+    statements.push(db.prepare('INSERT INTO audit_log(id,entity,entity_id,action,before_json,after_json,actor,created_at) SELECT ?,?,?,?,?,?,?,? WHERE ' + claim).bind(crypto.randomUUID(), 'import', id, 'approved', JSON.stringify({status: 'pending'}).slice(0, 4000), JSON.stringify({vendorId: vendor.id}).slice(0, 4000), actor, stamp, id, note));
+    statements.push(db.prepare("UPDATE import_rows SET status='pending', note='The unit could not be allocated.' WHERE id=? AND status='approved' AND note=? AND NOT EXISTS (SELECT 1 FROM vendors WHERE id=?)").bind(id, note, vendor.id));
+    await db.batch(statements);
+    const done = await db.prepare('SELECT status,note FROM import_rows WHERE id=?').bind(id).first<any>();
+    if (!done || done.note !== note) throw new Error('This row was already approved.');
+    const saved = await db.prepare('SELECT id FROM vendors WHERE id=?').bind(vendor.id).first();
+    if (!saved) throw new Error('The unit could not be allocated. The import row was not approved.');
     return {ok: true, id: vendor.id};
   }
   return null;

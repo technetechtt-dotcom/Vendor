@@ -34,7 +34,7 @@ async function record(db: ReturnType<typeof database>, eventId: string, method: 
   const once = ['handover', 'acknowledged', 'escalated', 'municipal'];
   if (once.includes(method)) {
     const existing = await db.prepare('SELECT id,status FROM notice_deliveries WHERE event_id=? AND method=? ORDER BY created_at DESC').bind(eventId, method).first<{id: string; status: string}>();
-    if (existing && !(method === 'municipal' && existing.status === 'failed')) return existing.id;
+    if (existing && !(method === 'municipal' && ['failed', 'rejected'].includes(existing.status))) return existing.id;
   }
   if (key) {
     const byKey = await db.prepare('SELECT id FROM notice_deliveries WHERE event_id=? AND idempotency_key=?').bind(eventId, key).first<{id: string}>();
@@ -86,22 +86,31 @@ async function handlePost(req: Request) {
   }
   if (body.action === 'send') {
     const webhook = noticeWebhook();
-    if (!webhook || !webhookAllowed(webhook)) return json({error: 'Municipal email is not connected. Download the PDF or use the email draft.'}, 409);
-    const already = await db.prepare("SELECT id,status FROM notice_deliveries WHERE event_id=? AND method='municipal' ORDER BY created_at DESC").bind(eventId).first<{id: string; status: string}>();
-    if (already && already.status !== 'failed') return json({ok: true, duplicate: true, message: 'The municipal sender already accepted this notice.'});
-    const payload = {reference: found.entry.id, kind: found.entry.kind, vendorId: found.vendor.id, vendorName: found.vendor.name, business: found.vendor.business, email: found.vendor.email, text: noticeText(found.vendor, found.entry)};
+    if (!webhook || !webhookAllowed(webhook)) return json({error: 'Municipal email is not connected. Download the PDF or use the email draft.', status: 'not connected'}, 409);
+    const latest = await db.prepare("SELECT id,status,detail FROM notice_deliveries WHERE event_id=? AND method='municipal' ORDER BY created_at DESC").bind(eventId).first<{id: string; status: string; detail: string}>();
+    if (latest && ['accepted by sender', 'sending'].includes(latest.status)) return json({ok: true, duplicate: true, status: latest.status, message: latest.status === 'sending' ? 'A municipal send is already in progress.' : 'The municipal sender already accepted this notice.'});
+    const claimId = crypto.randomUUID();
     try {
-      const response = await fetch(webhook, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+      await db.prepare('INSERT INTO notice_deliveries(id,event_id,method,status,detail,actor,created_at,recipient,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?)')
+        .bind(claimId, eventId, 'municipal', 'sending', 'Claimed before the sender is called', account.name, new Date().toISOString(), found.vendor.email.slice(0, 160), key).run();
+    } catch (error) {
+      if (!/UNIQUE/i.test(String(error))) throw error;
+      const current = await db.prepare("SELECT status FROM notice_deliveries WHERE event_id=? AND method='municipal' AND status IN ('sending','accepted by sender') ORDER BY created_at DESC").bind(eventId).first<{status: string}>();
+      return json({ok: true, duplicate: true, status: current?.status || 'sending', message: 'Another request already claimed this municipal send.'});
+    }
+    const payload = {reference: found.entry.id, idempotencyKey: found.entry.id, kind: found.entry.kind, vendorId: found.vendor.id, vendorName: found.vendor.name, business: found.vendor.business, email: found.vendor.email, text: noticeText(found.vendor, found.entry)};
+    try {
+      const response = await fetch(webhook, {method: 'POST', headers: {'Content-Type': 'application/json', 'Idempotency-Key': found.entry.id}, body: JSON.stringify(payload)});
       if (!response.ok) {
-        await record(db, eventId, 'municipal', 'rejected', 'HTTP ' + response.status, account.name, key, found.vendor.email);
-        return json({error: 'The municipal notice service did not accept this notice.'}, 502);
+        await db.prepare('UPDATE notice_deliveries SET status=?,detail=? WHERE id=?').bind('rejected', 'HTTP ' + response.status, claimId).run();
+        return json({error: 'The municipal notice service did not accept this notice.', status: 'rejected'}, 502);
       }
-      await record(db, eventId, 'municipal', 'accepted by sender', 'HTTP ' + response.status, account.name, key, found.vendor.email);
-      return json({ok: true, message: 'The municipal sender accepted the notice. This confirms acceptance, not that the trader opened it.'});
+      await db.prepare('UPDATE notice_deliveries SET status=?,detail=? WHERE id=?').bind('accepted by sender', 'HTTP ' + response.status, claimId).run();
+      return json({ok: true, status: 'accepted by sender', message: 'The municipal sender accepted the notice. This confirms acceptance, not that the trader opened it.'});
     } catch (error) {
       console.error(error);
-      await record(db, eventId, 'municipal', 'failed', 'The municipal sender could not be reached', account.name, key, found.vendor.email);
-      return json({error: 'The municipal sender could not be reached. The email draft is still available.'}, 502);
+      await db.prepare('UPDATE notice_deliveries SET status=?,detail=? WHERE id=?').bind('failed', 'The municipal sender could not be reached', claimId).run();
+      return json({error: 'The municipal sender could not be reached. The email draft is still available.', status: 'failed'}, 502);
     }
   }
   if (body.action === 'escalate') {

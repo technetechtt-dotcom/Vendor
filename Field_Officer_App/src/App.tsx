@@ -3,6 +3,7 @@ import {ScanLine, Search, X, MapPin, ShieldCheck, Wallet, ChevronLeft, Camera, C
 import {Vendor, Entry, Delivery, money, balance, permit, getRegisterBase, saveRegisterBase, getToken, getSession, saveSession, clearSession, authHeaders, noticeEmail, noticeText, hydrateSession, openProtected, FieldAccount} from './register';
 
 type VisitGPS = {lat: number; lng: number; accuracy: number};
+type QueueItem = {officialId: string; registerBase: string; payload: any; state: 'waiting' | 'rejected'; error: string};
 
 const date = (value: string) => new Date(value.length === 10 ? value + 'T12:00:00' : value).toLocaleDateString('en-ZA', {day: 'numeric', month: 'short', year: 'numeric'});
 
@@ -34,18 +35,32 @@ export function App() {
   const [senderConnected, setSenderConnected] = useState(false);
   const [noticeBusy, setNoticeBusy] = useState('');
   const [queued, setQueued] = useState(0);
+  const [rejected, setRejected] = useState<QueueItem[]>([]);
+  const [held, setHeld] = useState<QueueItem[]>([]);
   const activeVendor = useRef('');
   const noticeLock = useRef('');
 
-  function readDrafts() {
+  function accountScope() {
+    return (getRegisterBase() || '') + '|' + (getSession()?.id || '');
+  }
+  function readDraftStore() {
     try { return JSON.parse(localStorage.getItem('solplaatje.field.visitDrafts') || '{}'); } catch { return {}; }
   }
+  function readDrafts() {
+    const mine = readDraftStore()[accountScope()];
+    return mine && typeof mine === 'object' && !Array.isArray(mine) && !('note' in mine) ? mine : {};
+  }
+  function writeDrafts(mine: Record<string, any>) {
+    const all = readDraftStore();
+    all[accountScope()] = mine;
+    localStorage.setItem('solplaatje.field.visitDrafts', JSON.stringify(all));
+  }
   function stashDraft(vendorId?: string) {
-    if (!vendorId) return;
+    if (!vendorId || !getSession()?.id) return;
     const drafts = readDrafts();
     if (!note.trim() && !due && !gps) delete drafts[vendorId];
     else drafts[vendorId] = {note, due, kind, gps, key: visitKey.current || crypto.randomUUID()};
-    localStorage.setItem('solplaatje.field.visitDrafts', JSON.stringify(drafts));
+    writeDrafts(drafts);
   }
   function restoreDraft(vendorId: string) {
     const draft = readDrafts()[vendorId];
@@ -56,12 +71,33 @@ export function App() {
     visitKey.current = draft?.key || '';
     setVisit(Boolean(draft?.note || draft?.due || draft?.gps));
   }
-  function readQueue() {
-    try { return JSON.parse(localStorage.getItem('solplaatje.field.visitQueue') || '[]'); } catch { return []; }
+  function readQueue(): QueueItem[] {
+    try {
+      const parsed = JSON.parse(localStorage.getItem('solplaatje.field.visitQueue') || '[]');
+      if (!Array.isArray(parsed)) return [];
+      return parsed.map((item: any) => item?.payload && item.officialId !== undefined ? item : {officialId: '', registerBase: '', payload: item, state: 'rejected' as const, error: 'This visit was saved before it was tied to an official and register. It was not sent.'});
+    } catch { return []; }
   }
-  function writeQueue(items: unknown[]) {
+  function ownQueue(items = readQueue()) {
+    const officialId = getSession()?.id || '';
+    const base = getRegisterBase();
+    return items.filter(item => item.officialId === officialId && item.registerBase === base);
+  }
+  function writeQueue(items: QueueItem[]) {
     localStorage.setItem('solplaatje.field.visitQueue', JSON.stringify(items));
-    setQueued(items.length);
+    const mine = ownQueue(items);
+    setQueued(mine.filter(item => item.state === 'waiting').length);
+    setRejected(mine.filter(item => item.state === 'rejected'));
+    setHeld(items.filter(item => !item.officialId || !item.registerBase));
+  }
+  function readCache(vendorId: string) {
+    try { return JSON.parse(localStorage.getItem('solplaatje.field.vendorCache') || '{}')[accountScope()]?.[vendorId] || null; } catch { return null; }
+  }
+  function writeCache(vendorId: string, value: unknown) {
+    if (!getSession()?.id) return;
+    const all = JSON.parse(localStorage.getItem('solplaatje.field.vendorCache') || '{}');
+    all[accountScope()] = {...(all[accountScope()] || {}), [vendorId]: value};
+    localStorage.setItem('solplaatje.field.vendorCache', JSON.stringify(all));
   }
 
   function requireServer() {
@@ -88,6 +124,9 @@ export function App() {
         return;
       }
     }
+    let cardSerial = '';
+    const plus = value.indexOf('+');
+    if (plus > 0) { cardSerial = value.slice(plus + 1).toUpperCase().replace(/[^0-9A-Z .$/+%-]/g, ''); value = value.slice(0, plus); }
     value = value.toUpperCase();
     setId(value);
     if (!/^SPM-[A-Z0-9-]{3,60}$/.test(value)) {
@@ -100,6 +139,8 @@ export function App() {
       const body = await response.json();
       if (response.status === 401) { clearSession(); setSession(null); }
       if (!response.ok) throw new Error(body.error || 'Unable to load this vendor');
+      const currentCard = (body.cards || []).find((card: {status: string; cardSerial: string}) => ['issued', 'replacement'].includes(card.status) && card.cardSerial);
+      if (cardSerial && (!currentCard || String(currentCard.cardSerial).toUpperCase() !== cardSerial)) throw new Error('This card serial is not the current card. It was not opened as the active permit.');
       if (activeVendor.current && activeVendor.current !== body.vendor.id) stashDraft(activeVendor.current);
       activeVendor.current = body.vendor.id;
       setVendor(body.vendor);
@@ -108,7 +149,22 @@ export function App() {
       setSenderConnected(Boolean(body.senderConnected));
       setTab('Profile');
       restoreDraft(body.vendor.id);
+      writeCache(body.vendor.id, {vendor: body.vendor, events: body.events, deliveries: body.deliveries || []});
+      if (!cardSerial && currentCard?.cardSerial) setNotice('This card has no serial. The current card serial is ' + currentCard.cardSerial + '.');
     } catch (cause) {
+      if (cause instanceof TypeError) {
+        const cached = readCache(value);
+        if (cached?.vendor) {
+          if (activeVendor.current && activeVendor.current !== cached.vendor.id) stashDraft(activeVendor.current);
+          activeVendor.current = cached.vendor.id;
+          setVendor(cached.vendor);
+          setEvents(cached.events || []);
+          setDeliveries(cached.deliveries || []);
+          restoreDraft(cached.vendor.id);
+          setNotice('Showing the copy saved on this phone. A card that has not been opened on this phone still needs a connection.');
+          return;
+        }
+      }
       setVendor(null);
       setError(cause instanceof Error ? cause.message : 'Could not load the vendor. Check the register address and your connection.');
     } finally {
@@ -134,21 +190,32 @@ export function App() {
   useEffect(() => {
     const flush = async () => {
       const base = getRegisterBase();
-      if (!base || !getToken()) return;
-      let queue = readQueue();
-      const remaining = [];
+      const officialId = getSession()?.id || '';
+      if (!base || !getToken() || !officialId) return;
+      const queue = readQueue();
+      let sent = 0;
+      let attempted = 0;
+      const next: QueueItem[] = [];
       for (const item of queue) {
+        if (item.officialId !== officialId || item.registerBase !== base || item.state === 'rejected' || !item.payload?.action) {
+          next.push(item);
+          continue;
+        }
+        attempted++;
         try {
-          const response = await fetch(`${base}/api/register`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify(item)});
-          if (!response.ok && response.status !== 400) remaining.push(item);
+          const response = await fetch(`${base}/api/register`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify(item.payload)});
+          const body = await response.json().catch(() => ({}));
+          if (response.ok) { sent++; continue; }
+          next.push({...item, state: 'rejected', error: body.error || 'The register rejected this visit (' + response.status + ').'});
         } catch {
-          remaining.push(item);
+          next.push({...item, state: 'waiting', error: ''});
         }
       }
-      writeQueue(remaining);
-      if (queue.length && !remaining.length) setNotice('Queued visits were sent to the register.');
+      writeQueue(next);
+      if (attempted && sent === attempted) setNotice('Queued visits were sent to the register.');
+      else if (sent) setNotice(sent + ' queued visit' + (sent === 1 ? '' : 's') + ' sent. Rejected visits stay on this phone until you correct or dismiss them.');
     };
-    setQueued(readQueue().length);
+    writeQueue(readQueue());
     flush();
     window.addEventListener('online', flush);
     return () => window.removeEventListener('online', flush);
@@ -222,7 +289,7 @@ export function App() {
       visitKey.current = '';
       const drafts = readDrafts();
       delete drafts[vendor.id];
-      localStorage.setItem('solplaatje.field.visitDrafts', JSON.stringify(drafts));
+      writeDrafts(drafts);
       setVisit(false);
       setNote('');
       setDue('');
@@ -232,11 +299,12 @@ export function App() {
     } catch (cause) {
       if (cause instanceof TypeError) {
         const queue = readQueue();
-        if (!queue.some((item: {idempotencyKey?: string}) => item.idempotencyKey === payload.idempotencyKey)) queue.push(payload);
+        const officialId = getSession()?.id || '';
+        if (officialId && !queue.some(item => item.payload?.idempotencyKey === payload.idempotencyKey && item.officialId === officialId && item.registerBase === base)) queue.push({officialId, registerBase: base, payload, state: 'waiting', error: ''});
         writeQueue(queue);
         const drafts = readDrafts();
         delete drafts[vendor.id];
-        localStorage.setItem('solplaatje.field.visitDrafts', JSON.stringify(drafts));
+        writeDrafts(drafts);
         visitKey.current = '';
         setVisit(false);
         setNote('');
@@ -475,6 +543,8 @@ export function App() {
           <>
             <button className="field-back" onClick={() => { stashDraft(vendor.id); activeVendor.current = ''; setVendor(null); setVisit(false); setNote(''); setDue(''); setGPS(null); visitKey.current = ''; setError(''); setNotice(''); }}><ChevronLeft size={17} />Scan another card</button>
             {queued > 0 && <p className="field-help">{queued} visit{queued === 1 ? '' : 's'} saved on this phone, waiting to send.</p>}
+            {rejected.map(item => <section className="field-sample" key={(item.payload?.idempotencyKey || item.error) + item.officialId}><p>{item.error || 'The register rejected this visit.'}</p><p>{item.payload?.vendorId} · {item.payload?.kind}</p><button type="button" onClick={() => { setId(item.payload?.vendorId || ''); setKind(item.payload?.kind || 'Inspection'); setNote(String(item.payload?.note || '').split('\nVisit GPS')[0]); setDue(item.payload?.due || ''); visitKey.current = item.payload?.idempotencyKey || ''; setVisit(true); writeQueue(readQueue().filter(row => row.payload?.idempotencyKey !== item.payload?.idempotencyKey || row.officialId !== item.officialId)); }}>Correct</button><button type="button" onClick={() => writeQueue(readQueue().filter(row => row.payload?.idempotencyKey !== item.payload?.idempotencyKey || row.officialId !== item.officialId))}>Dismiss</button></section>)}
+            {held.map(item => <section className="field-sample" key={'held-' + (item.payload?.idempotencyKey || item.error)}><p>{item.error || 'This visit is not tied to the signed-in official and was not sent.'}</p><button type="button" onClick={() => writeQueue(readQueue().filter(row => row.officialId || row.payload?.idempotencyKey !== item.payload?.idempotencyKey || row.error !== item.error))}>Dismiss</button></section>)}
             <div className="field-vendor-head">
               {portrait ? <img src={portrait} alt={'Profile picture of ' + vendor.name} /> : <span>{vendor.name.split(' ').slice(0, 2).map(part => part[0]).join('')}</span>}
               <div><p className="mono">{vendor.id}</p><h1>{vendor.business}</h1><p>{vendor.name}</p></div>

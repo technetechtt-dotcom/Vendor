@@ -127,6 +127,12 @@ async function handlePost(req: Request) {
     return json({user: publicAccount({...account, mustChangePassword: 0})});
   }
   if (passwordPending(account)) return json({error: 'Change your password before continuing.'}, 403);
+  if (body.action === 'sessions') {
+    const userId = account.role === 'superuser' ? String(body.userId || account.id) : account.id;
+    const rows = await db.prepare('SELECT token,created_at AS createdAt,expires_at AS expiresAt,device FROM sessions WHERE user_id=? AND expires_at>? ORDER BY created_at DESC').bind(userId, new Date().toISOString()).all<any>();
+    const current = sessionToken(req);
+    return json({sessions: rows.results.map(row => ({createdAt: row.createdAt, expiresAt: row.expiresAt, device: row.device || 'Unknown device', current: row.token === current}))});
+  }
   if (body.action === 'revoke-sessions') {
     const target = String(body.userId || account.id);
     if (account.role !== 'superuser' && target !== account.id) return json({error: 'You can only sign out your own other devices.'}, 403);
@@ -140,12 +146,6 @@ async function handlePost(req: Request) {
   if (body.action === 'users') {
     const rows = await db.prepare('SELECT id,name,email,role,active,must_change_password AS mustChangePassword,created_at AS createdAt FROM users ORDER BY created_at').all<any>();
     return json({users: rows.results});
-  }
-  if (body.action === 'sessions') {
-    const userId = String(body.userId || account.id);
-    const rows = await db.prepare('SELECT token,created_at AS createdAt,expires_at AS expiresAt,device FROM sessions WHERE user_id=? AND expires_at>? ORDER BY created_at DESC').bind(userId, new Date().toISOString()).all<any>();
-    const current = sessionToken(req);
-    return json({sessions: rows.results.map(row => ({createdAt: row.createdAt, expiresAt: row.expiresAt, device: row.device || 'Unknown device', current: row.token === current}))});
   }
   if (body.action === 'save-user') {
     const input = body.user || {};
