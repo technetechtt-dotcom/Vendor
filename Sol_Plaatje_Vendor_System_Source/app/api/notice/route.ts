@@ -87,8 +87,12 @@ async function handlePost(req: Request) {
   if (body.action === 'send') {
     const webhook = noticeWebhook();
     if (!webhook || !webhookAllowed(webhook)) return json({error: 'Municipal email is not connected. Download the PDF or use the email draft.', status: 'not connected'}, 409);
-    const latest = await db.prepare("SELECT id,status,detail FROM notice_deliveries WHERE event_id=? AND method='municipal' ORDER BY created_at DESC").bind(eventId).first<{id: string; status: string; detail: string}>();
-    if (latest && ['accepted by sender', 'sending'].includes(latest.status)) return json({ok: true, duplicate: true, status: latest.status, message: latest.status === 'sending' ? 'A municipal send is already in progress.' : 'The municipal sender already accepted this notice.'});
+    const claimTtlMs = 120000;
+    const staleBefore = new Date(Date.now() - claimTtlMs).toISOString();
+    await db.prepare("UPDATE notice_deliveries SET status='failed', detail='Send claim expired before the sender responded' WHERE method='municipal' AND status='sending' AND created_at<?").bind(staleBefore).run();
+    const latest = await db.prepare("SELECT id,status,detail,created_at AS createdAt FROM notice_deliveries WHERE event_id=? AND method='municipal' ORDER BY created_at DESC").bind(eventId).first<{id: string; status: string; detail: string; createdAt: string}>();
+    if (latest?.status === 'accepted by sender') return json({ok: true, duplicate: true, status: latest.status, message: 'The municipal sender already accepted this notice.'});
+    if (latest?.status === 'sending') return json({ok: true, duplicate: true, status: 'sending', message: 'A municipal send is already in progress.'});
     const claimId = crypto.randomUUID();
     try {
       await db.prepare('INSERT INTO notice_deliveries(id,event_id,method,status,detail,actor,created_at,recipient,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?)')
@@ -100,7 +104,7 @@ async function handlePost(req: Request) {
     }
     const payload = {reference: found.entry.id, idempotencyKey: found.entry.id, kind: found.entry.kind, vendorId: found.vendor.id, vendorName: found.vendor.name, business: found.vendor.business, email: found.vendor.email, text: noticeText(found.vendor, found.entry)};
     try {
-      const response = await fetch(webhook, {method: 'POST', headers: {'Content-Type': 'application/json', 'Idempotency-Key': found.entry.id}, body: JSON.stringify(payload)});
+      const response = await fetch(webhook, {method: 'POST', headers: {'Content-Type': 'application/json', 'Idempotency-Key': found.entry.id}, body: JSON.stringify(payload), signal: AbortSignal.timeout(20000)});
       if (!response.ok) {
         await db.prepare('UPDATE notice_deliveries SET status=?,detail=? WHERE id=?').bind('rejected', 'HTTP ' + response.status, claimId).run();
         return json({error: 'The municipal notice service did not accept this notice.', status: 'rejected'}, 502);
@@ -109,8 +113,9 @@ async function handlePost(req: Request) {
       return json({ok: true, status: 'accepted by sender', message: 'The municipal sender accepted the notice. This confirms acceptance, not that the trader opened it.'});
     } catch (error) {
       console.error(error);
-      await db.prepare('UPDATE notice_deliveries SET status=?,detail=? WHERE id=?').bind('failed', 'The municipal sender could not be reached', claimId).run();
-      return json({error: 'The municipal sender could not be reached. The email draft is still available.', status: 'failed'}, 502);
+      const timedOut = error instanceof Error && (/abort|timeout/i.test(error.name + error.message));
+      await db.prepare('UPDATE notice_deliveries SET status=?,detail=? WHERE id=?').bind('failed', timedOut ? 'The municipal sender timed out' : 'The municipal sender could not be reached', claimId).run();
+      return json({error: timedOut ? 'The municipal sender timed out. Retry when ready.' : 'The municipal sender could not be reached. The email draft is still available.', status: 'failed'}, 502);
     }
   }
   if (body.action === 'escalate') {
@@ -123,6 +128,7 @@ async function handlePost(req: Request) {
     const now = new Date().toISOString();
     await db.batch([
       db.prepare('INSERT INTO events(id,vendor_id,kind,amount,note,due,created_at,actor,resolved) VALUES(?,?,?,?,?,?,?,?,0)').bind(id, found.vendor.id, 'Escalation', 0, 'Case ' + found.entry.id + ': ' + note, found.entry.due || '', now, account.name),
+      db.prepare("UPDATE events SET case_status='escalated' WHERE id=? AND resolved=0").bind(eventId),
       db.prepare('INSERT INTO notice_deliveries(id,event_id,method,status,detail,actor,created_at,recipient,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(), eventId, 'escalated', 'recorded', note.slice(0, 300), account.name, now, String(body.destination || 'LED Office').slice(0, 160), key),
     ]);
     return json({ok: true, message: 'Escalation recorded.'});

@@ -103,14 +103,15 @@ export async function allocationPlan(db: Sql, vendor: any, hubId: string, actor:
   const claim = claimExists(gate);
   const claimArgs = gate ? [gate.id, gate.note] : [];
   const available = `NOT EXISTS (SELECT 1 FROM hub_units WHERE hub_id=? AND unit_code=? AND status IN ('reserved','unavailable'))`;
+  const keeping = Boolean(vendor.type === 'Formal' && previous && previous.unit === vendor.unit && (previous.hubId === hubId || previous.hub === vendor.hub));
   if (vendor.type === 'Formal') {
     const unit = await db.prepare('SELECT status FROM hub_units WHERE hub_id=? AND unit_code=?').bind(hubId, vendor.unit).first<{status: string}>();
     const holder = await db.prepare('SELECT vendor_id FROM allocations WHERE (hub_id=? OR hub=?) AND unit=?').bind(hubId, vendor.hub, vendor.unit).first<{vendor_id: string}>();
-    const keeping = previous && previous.unit === vendor.unit && (previous.hubId === hubId || previous.hub === vendor.hub);
     if (holder && holder.vendor_id !== vendor.id) throw new Error('This hub unit is already allocated to another vendor.');
     if (unit && ['reserved', 'unavailable'].includes(unit.status) && !keeping) throw new Error('This unit is ' + unit.status + ' and cannot be allocated.');
     if (unit && unit.status === 'occupied' && !keeping && holder && holder.vendor_id !== vendor.id) throw new Error('This unit is already occupied.');
   }
+  if (keeping) return [];
   const statements: SqlStatement[] = [db.prepare('DELETE FROM allocations WHERE vendor_id=?' + (claim ? ' AND ' + claim : '')).bind(vendor.id, ...claimArgs)];
   const changed = !previous || vendor.type !== 'Formal' || previous.unit !== vendor.unit || previous.hub !== vendor.hub;
   if (previous && changed) {
@@ -261,8 +262,13 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     if (status === 'revoked') vendor.status = 'Suspended';
     await db.prepare('UPDATE vendors SET payload=?,updated_at=? WHERE id=?').bind(JSON.stringify(vendor), stamp, vendor.id).run();
     const id = crypto.randomUUID();
-    await db.prepare('INSERT INTO permits(id,vendor_id,permit_number,card_serial,status,note,actor,created_at) VALUES(?,?,?,?,?,?,?,?)')
-      .bind(id, vendor.id, vendor.id, serial, status, note, actor, stamp).run();
+    try {
+      await db.prepare('INSERT INTO permits(id,vendor_id,permit_number,card_serial,status,note,actor,created_at) VALUES(?,?,?,?,?,?,?,?)')
+        .bind(id, vendor.id, vendor.id, serial, status, note, actor, stamp).run();
+    } catch (error) {
+      if (/UNIQUE/i.test(String(error))) throw new Error('That card serial is already recorded. Issue or replacement needs a new serial.');
+      throw error;
+    }
     await db.prepare('INSERT INTO events(id,vendor_id,kind,amount,note,due,created_at,actor,resolved) VALUES(?,?,?,?,?,?,?,?,0)')
       .bind(crypto.randomUUID(), vendor.id, 'Permit', 0, status + ': ' + note, '', stamp, actor).run();
     await writeAudit(db, 'permit', vendor.id, status, {status: JSON.parse(row.payload).status, expires: JSON.parse(row.payload).expires}, {serial, expires: vendor.expires, status: vendor.status}, actor, stamp);
@@ -286,8 +292,9 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     if (severity && !['Low', 'Medium', 'High'].includes(severity)) throw new Error('Choose a severity.');
     const open = await db.prepare("SELECT id,owner,severity,case_status FROM events WHERE id=? AND kind IN ('Warning','Violation','Inspection') AND resolved=0").bind(id).first<any>();
     if (!open) throw new Error('That case is no longer open.');
-    await db.prepare("UPDATE events SET owner=?,severity=?,case_status='open' WHERE id=?").bind(owner, severity, id).run();
-    await writeAudit(db, 'case', id, 'assigned', {owner: open.owner, severity: open.severity, caseStatus: open.case_status}, {owner, severity}, actor, stamp);
+    const caseStatus = open.case_status && ['open', 'follow-up', 'escalated'].includes(open.case_status) ? open.case_status : 'open';
+    await db.prepare('UPDATE events SET owner=?,severity=?,case_status=? WHERE id=?').bind(owner, severity, caseStatus, id).run();
+    await writeAudit(db, 'case', id, 'assigned', {owner: open.owner, severity: open.severity, caseStatus: open.case_status}, {owner, severity, caseStatus}, actor, stamp);
     return {ok: true};
   }
   if (body.action === 'reconcile') {

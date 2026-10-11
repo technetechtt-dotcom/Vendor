@@ -4,7 +4,7 @@ import {Vendor, Entry, Delivery, money, balance, permit, decideCard, getRegister
 
 type VisitGPS = {lat: number; lng: number; accuracy: number};
 type QueueItem = {officialId: string; registerBase: string; payload: any; state: 'waiting' | 'rejected'; error: string};
-type HistoryItem = {at: string; action: 'dismissed' | 'sent' | 'corrected'; vendorId: string; kind: string; detail: string};
+type HistoryItem = {at: string; action: 'dismissed' | 'sent' | 'corrected' | 'cleared'; vendorId: string; kind: string; detail: string};
 
 const date = (value: string) => new Date(value.length === 10 ? value + 'T12:00:00' : value).toLocaleDateString('en-ZA', {day: 'numeric', month: 'short', year: 'numeric'});
 
@@ -41,8 +41,11 @@ export function App() {
   const [waiting, setWaiting] = useState<QueueItem[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [recovery, setRecovery] = useState(false);
+  const [cardWarning, setCardWarning] = useState('');
   const activeVendor = useRef('');
   const noticeLock = useRef('');
+  const syncLock = useRef(false);
+  const correcting = useRef<{key: string; payload: any} | null>(null);
 
   function accountScope() {
     return (getRegisterBase() || '') + '|' + (getSession()?.id || '');
@@ -65,15 +68,6 @@ export function App() {
     if (!note.trim() && !due && !gps) delete drafts[vendorId];
     else drafts[vendorId] = {note, due, kind, gps, key: visitKey.current || crypto.randomUUID()};
     writeDrafts(drafts);
-  }
-  function restoreDraft(vendorId: string) {
-    const draft = readDrafts()[vendorId];
-    setNote(draft?.note || '');
-    setDue(draft?.due || '');
-    setKind(draft?.kind || 'Inspection');
-    setGPS(draft?.gps || null);
-    visitKey.current = draft?.key || '';
-    setVisit(Boolean(draft?.note || draft?.due || draft?.gps));
   }
   function readQueue(): QueueItem[] {
     try {
@@ -113,10 +107,116 @@ export function App() {
   }
   function pushHistory(item: Omit<HistoryItem, 'at'>) {
     const all = JSON.parse(localStorage.getItem('solplaatje.field.visitHistory') || '{}');
-    const mine = [ {at: new Date().toISOString(), ...item}, ...(Array.isArray(all[accountScope()]) ? all[accountScope()] : []) ].slice(0, 40);
+    const mine = [{at: new Date().toISOString(), ...item}, ...(Array.isArray(all[accountScope()]) ? all[accountScope()] : [])].slice(0, 100);
     all[accountScope()] = mine;
     localStorage.setItem('solplaatje.field.visitHistory', JSON.stringify(all));
     setHistory(mine);
+  }
+  function restoreDraft(vendorId: string) {
+    const draft = readDrafts()[vendorId];
+    setNote(draft?.note || '');
+    setDue(draft?.due || '');
+    setKind(draft?.kind || 'Inspection');
+    setGPS(draft?.gps || null);
+    visitKey.current = draft?.key || '';
+    setVisit(Boolean(draft?.note || draft?.due || draft?.gps));
+  }
+  function applyRejectedVisit(payload: any) {
+    const vendorId = payload?.vendorId || '';
+    setKind(payload?.kind || 'Inspection');
+    setNote(String(payload?.note || '').split('\nVisit GPS')[0]);
+    setDue(payload?.due || '');
+    visitKey.current = payload?.idempotencyKey || crypto.randomUUID();
+    const lat = Number(payload?.gpsLat);
+    const lng = Number(payload?.gpsLng);
+    if (Number.isFinite(lat) && Number.isFinite(lng) && String(payload?.gpsLat || '') && String(payload?.gpsLng || '')) {
+      setGPS({lat, lng, accuracy: Number(payload?.gpsAccuracy) || 0});
+    } else setGPS(null);
+    setVisit(true);
+    if (vendorId) {
+      const drafts = readDrafts();
+      delete drafts[vendorId];
+      writeDrafts(drafts);
+    }
+  }
+  function visitKeyOf(item: QueueItem) {
+    return String(item.payload?.idempotencyKey || '');
+  }
+  function mergeVisit(items: QueueItem[], officialId: string, key: string, next: QueueItem | null) {
+    const without = items.filter(item => !(item.officialId === officialId && visitKeyOf(item) === key));
+    return next ? [...without, next] : without;
+  }
+  function classifySyncResponse(status: number, body: any): {state: 'waiting' | 'rejected'; error: string; sessionExpired?: boolean} {
+    if (status === 401 || status === 403) return {state: 'waiting', error: 'Sign-in expired. Sign in again, then retry. The visit was not discarded.', sessionExpired: true};
+    if (status === 429 || status >= 500) return {state: 'waiting', error: 'Temporary register problem (' + status + '). Kept waiting for retry.'};
+    return {state: 'rejected', error: body?.error || ('The register rejected this visit (' + status + ').')};
+  }
+  async function syncQueue(manual = false) {
+    if (syncLock.current) return;
+    const base = getRegisterBase();
+    const officialId = getSession()?.id || '';
+    if (!base || !getToken() || !officialId) return;
+    syncLock.current = true;
+    let sent = 0;
+    let attempted = 0;
+    try {
+      const snapshot = readQueue().filter(item => item.officialId === officialId && item.registerBase === base && item.state === 'waiting' && item.payload?.action);
+      for (const item of snapshot) {
+        const key = visitKeyOf(item);
+        if (!key) continue;
+        const live = readQueue().find(row => row.officialId === officialId && visitKeyOf(row) === key);
+        if (!live || live.state !== 'waiting') continue;
+        attempted++;
+        try {
+          const response = await fetch(base + '/api/register', {method: 'POST', headers: authHeaders(true), body: JSON.stringify(live.payload)});
+          const body = await response.json().catch(() => ({}));
+          const current = readQueue();
+          if (response.ok) {
+            sent++;
+            pushHistory({action: 'sent', vendorId: live.payload?.vendorId || '', kind: live.payload?.kind || 'Visit', detail: 'Accepted by the register.'});
+            writeQueue(mergeVisit(current, officialId, key, null));
+            continue;
+          }
+          const outcome = classifySyncResponse(response.status, body);
+          if (outcome.sessionExpired) { clearSession(); setSession(null); }
+          writeQueue(mergeVisit(current, officialId, key, {...live, state: outcome.state, error: outcome.error}));
+        } catch {
+          const current = readQueue();
+          const still = current.find(row => row.officialId === officialId && visitKeyOf(row) === key);
+          if (still) writeQueue(mergeVisit(current, officialId, key, {...still, state: 'waiting', error: still.error || ''}));
+        }
+      }
+      if (manual || attempted) {
+        if (attempted && sent === attempted) setNotice('Queued visits were sent to the register.');
+        else if (sent) setNotice(sent + ' queued visit' + (sent === 1 ? '' : 's') + ' sent. Rejected visits stay until you correct or dismiss them.');
+        else if (manual && !attempted) setNotice('No waiting visits to retry.');
+      }
+    } finally {
+      syncLock.current = false;
+      writeQueue(readQueue());
+    }
+  }
+  function openRecovery() {
+    writeQueue(readQueue());
+    setHistory(readHistory());
+    setRecovery(true);
+  }
+  function clearPhoneData() {
+    const officialId = getSession()?.id || '';
+    const base = getRegisterBase();
+    const scope = accountScope();
+    for (const key of ['solplaatje.field.visitDrafts', 'solplaatje.field.vendorCache', 'solplaatje.field.visitHistory']) {
+      try {
+        const all = JSON.parse(localStorage.getItem(key) || '{}');
+        if (all && typeof all === 'object' && !Array.isArray(all)) {
+          delete all[scope];
+          localStorage.setItem(key, JSON.stringify(all));
+        }
+      } catch { /* keep going */ }
+    }
+    writeQueue(readQueue().filter(item => !(item.officialId === officialId && item.registerBase === base)));
+    pushHistory({action: 'cleared', vendorId: '', kind: 'Phone data', detail: 'Drafts, queue, vendor cache and history for this official were cleared on this device.'});
+    setNotice('Phone copies for this official were cleared. Sign out other devices from the register if the phone is lost.');
   }
 
   function requireServer() {
@@ -167,25 +267,39 @@ export function App() {
       setDeliveries(Array.isArray(body.deliveries) ? body.deliveries : []);
       setSenderConnected(Boolean(body.senderConnected));
       setTab('Profile');
-      restoreDraft(body.vendor.id);
-      writeCache(body.vendor.id, {vendor: body.vendor, events: body.events, deliveries: body.deliveries || [], cards: body.cards || []});
-      if (!verdict.valid || verdict.outcome === 'legacy' || verdict.outcome === 'missing-serial') setNotice(verdict.message);
-      else setNotice(verdict.message === 'This is the current card.' ? '' : verdict.message);
+      writeCache(body.vendor.id, {vendor: body.vendor, events: body.events, deliveries: body.deliveries || [], cards: body.cards || [], savedAt: new Date().toISOString()});
+      if (correcting.current && correcting.current.payload?.vendorId === body.vendor.id) applyRejectedVisit(correcting.current.payload);
+      else restoreDraft(body.vendor.id);
+      const warn = (!verdict.valid || ['revoked', 'replaced', 'unrecognised', 'missing-serial'].includes(verdict.outcome)) ? verdict.message : '';
+      setCardWarning(warn);
+      setNotice(warn ? '' : (verdict.outcome === 'legacy' ? verdict.message : ''));
     } catch (cause) {
       if (cause instanceof TypeError) {
         const cached = readCache(value);
         if (cached?.vendor) {
+          const verdict = decideCard(Array.isArray(cached.cards) ? cached.cards : [], cardSerial);
+          if (cardSerial && !verdict.valid) {
+            setVendor(null);
+            setCardWarning(verdict.message);
+            setError(verdict.message + ' Checked against the card history saved on this phone' + (cached.savedAt ? ' on ' + date(cached.savedAt) : '') + '.');
+            return;
+          }
           if (activeVendor.current && activeVendor.current !== cached.vendor.id) stashDraft(activeVendor.current);
           activeVendor.current = cached.vendor.id;
           setVendor(cached.vendor);
           setEvents(cached.events || []);
           setDeliveries(cached.deliveries || []);
-          restoreDraft(cached.vendor.id);
-          setNotice('Showing the copy saved on this phone. A card that has not been opened on this phone still needs a connection.');
+          if (correcting.current && correcting.current.payload?.vendorId === cached.vendor.id) applyRejectedVisit(correcting.current.payload);
+          else restoreDraft(cached.vendor.id);
+          const warn = (!verdict.valid || ['revoked', 'replaced', 'unrecognised', 'missing-serial'].includes(verdict.outcome)) ? verdict.message : '';
+          setCardWarning(warn);
+          setNotice('Showing the copy saved on this phone' + (cached.savedAt ? ' on ' + date(cached.savedAt) : '') + '. Card validity uses that saved card history.');
           return;
         }
       }
       setVendor(null);
+      setCardWarning('');
+      if (correcting.current) correcting.current = null;
       setError(cause instanceof Error ? cause.message : 'Could not load the vendor. Check the register address and your connection.');
     } finally {
       setBusy(false);
@@ -208,37 +322,11 @@ export function App() {
   }, [vendor?.id, note, due, kind, gps]);
 
   useEffect(() => {
-    const flush = async () => {
-      const base = getRegisterBase();
-      const officialId = getSession()?.id || '';
-      if (!base || !getToken() || !officialId) return;
-      const queue = readQueue();
-      let sent = 0;
-      let attempted = 0;
-      const next: QueueItem[] = [];
-      for (const item of queue) {
-        if (item.officialId !== officialId || item.registerBase !== base || item.state === 'rejected' || !item.payload?.action) {
-          next.push(item);
-          continue;
-        }
-        attempted++;
-        try {
-          const response = await fetch(`${base}/api/register`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify(item.payload)});
-          const body = await response.json().catch(() => ({}));
-          if (response.ok) { sent++; pushHistory({action: 'sent', vendorId: item.payload?.vendorId || '', kind: item.payload?.kind || 'Visit', detail: 'Accepted by the register.'}); continue; }
-          next.push({...item, state: 'rejected', error: body.error || 'The register rejected this visit (' + response.status + ').'});
-        } catch {
-          next.push({...item, state: 'waiting', error: ''});
-        }
-      }
-      writeQueue(next);
-      if (attempted && sent === attempted) setNotice('Queued visits were sent to the register.');
-      else if (sent) setNotice(sent + ' queued visit' + (sent === 1 ? '' : 's') + ' sent. Rejected visits stay on this phone until you correct or dismiss them.');
-    };
     writeQueue(readQueue());
-    flush();
-    window.addEventListener('online', flush);
-    return () => window.removeEventListener('online', flush);
+    void syncQueue(false);
+    const onOnline = () => { void syncQueue(false); };
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
   }, [session?.id]);
 
   useEffect(() => {
@@ -300,12 +388,22 @@ export function App() {
         body: JSON.stringify(payload),
       });
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error);
+      if (!response.ok) {
+        const outcome = classifySyncResponse(response.status, body);
+        if (outcome.sessionExpired) { clearSession(); setSession(null); }
+        throw new Error(outcome.error || body.error);
+      }
       try {
         const next = await fetch(`${base}/api/register?vendorId=${encodeURIComponent(vendor.id)}`, {cache: 'no-store', headers: authHeaders()});
         const nextBody = await next.json();
         if (next.ok) { setEvents(nextBody.events); setDeliveries(Array.isArray(nextBody.deliveries) ? nextBody.deliveries : []); }
       } catch { /* The write succeeded; do not offer a duplicate submission. */ }
+      const officialId = getSession()?.id || '';
+      if (officialId && payload.idempotencyKey) writeQueue(mergeVisit(readQueue(), officialId, payload.idempotencyKey, null));
+      if (correcting.current?.key === payload.idempotencyKey) {
+        pushHistory({action: 'corrected', vendorId: vendor.id, kind: kind, detail: 'Corrected visit accepted by the register.'});
+        correcting.current = null;
+      }
       visitKey.current = '';
       const drafts = readDrafts();
       delete drafts[vendor.id];
@@ -318,20 +416,29 @@ export function App() {
       setTab('Compliance');
     } catch (cause) {
       if (cause instanceof TypeError) {
-        const queue = readQueue();
         const officialId = getSession()?.id || '';
-        if (officialId && !queue.some(item => item.payload?.idempotencyKey === payload.idempotencyKey && item.officialId === officialId && item.registerBase === base)) queue.push({officialId, registerBase: base, payload, state: 'waiting', error: ''});
-        writeQueue(queue);
+        if (officialId) {
+          const queuedItem = {officialId, registerBase: base, payload, state: 'waiting' as const, error: ''};
+          writeQueue(mergeVisit(readQueue(), officialId, payload.idempotencyKey, queuedItem));
+        }
         const drafts = readDrafts();
         delete drafts[vendor.id];
         writeDrafts(drafts);
-        visitKey.current = '';
         setVisit(false);
         setNote('');
         setDue('');
         setGPS(null);
         setNotice('Saved on this phone. It will be sent when the register can be reached. The same visit will not be saved twice.');
-      } else setError(cause instanceof Error ? cause.message : 'Could not save. Your notes remain here; reconnect and try again.');
+        correcting.current = null;
+      } else {
+        const officialId = getSession()?.id || '';
+        if (officialId && correcting.current?.key === payload.idempotencyKey) {
+          const message = cause instanceof Error ? cause.message : 'Could not save.';
+          const temporary = /temporary|expired|429|50\d/i.test(message);
+          writeQueue(mergeVisit(readQueue(), officialId, payload.idempotencyKey, {officialId, registerBase: base, payload, state: temporary ? 'waiting' : 'rejected', error: message}));
+        }
+        setError(cause instanceof Error ? cause.message : 'Could not save. Your notes remain here; reconnect and try again.');
+      }
     } finally {
       setBusy(false);
     }
@@ -539,34 +646,13 @@ export function App() {
             <button className="field-back" type="button" onClick={() => setRecovery(false)}><ChevronLeft size={17} />Back to scan</button>
             <section className="field-panel">
               <h2>Offline visit recovery</h2>
-              <p className="muted">Rejected visits stay here until you correct them or dismiss them. Waiting visits retry when the register can be reached.</p>
-              <button className="secondary field-wide" type="button" disabled={busy} onClick={async () => {
-                setBusy(true); setError(''); setNotice('');
-                try {
-                  const base = getRegisterBase();
-                  const officialId = getSession()?.id || '';
-                  if (!base || !officialId) throw new Error('Sign in and save the register address first.');
-                  const queue = readQueue();
-                  let sent = 0;
-                  const next = [];
-                  for (const item of queue) {
-                    if (item.officialId !== officialId || item.registerBase !== base || item.state !== 'waiting' || !item.payload?.action) { next.push(item); continue; }
-                    try {
-                      const response = await fetch(base + '/api/register', {method: 'POST', headers: authHeaders(true), body: JSON.stringify(item.payload)});
-                      const body = await response.json().catch(() => ({}));
-                      if (response.ok) { sent++; pushHistory({action: 'sent', vendorId: item.payload?.vendorId || '', kind: item.payload?.kind || 'Visit', detail: 'Accepted by the register.'}); continue; }
-                      next.push({...item, state: 'rejected', error: body.error || ('The register rejected this visit (' + response.status + ').')});
-                    } catch { next.push({...item, state: 'waiting', error: ''}); }
-                  }
-                  writeQueue(next);
-                  setNotice(sent ? sent + ' visit' + (sent === 1 ? '' : 's') + ' sent.' : 'No waiting visits could be sent yet.');
-                } catch (cause) { setError(cause instanceof Error ? cause.message : 'Retry failed.'); }
-                finally { setBusy(false); }
-              }}>Retry waiting visits</button>
+              <p className="muted">Rejected visits stay here until a corrected submission succeeds or you dismiss them. Waiting visits retry when the register can be reached. Temporary server problems stay waiting.</p>
+              <button className="secondary field-wide" type="button" disabled={busy} onClick={async () => { setBusy(true); setError(''); setNotice(''); try { await syncQueue(true); } finally { setBusy(false); } }}>Retry waiting visits</button>
             </section>
             {waiting.map(item => <section className="field-sample" key={'wait-' + (item.payload?.idempotencyKey || '') + item.officialId}><strong>Waiting to send</strong><p>{item.payload?.vendorId} · {item.payload?.kind}</p><p>{String(item.payload?.note || '').split('\nVisit GPS')[0]}</p></section>)}
-            {rejected.map(item => <section className="field-alert" key={'rej-' + (item.payload?.idempotencyKey || item.error) + item.officialId}><strong>Rejected</strong><p>{item.error || 'The register rejected this visit.'}</p><p>{item.payload?.vendorId} · {item.payload?.kind}</p><p>{String(item.payload?.note || '').split('\nVisit GPS')[0]}</p><button type="button" onClick={() => { setRecovery(false); setId(item.payload?.vendorId || ''); setKind(item.payload?.kind || 'Inspection'); setNote(String(item.payload?.note || '').split('\nVisit GPS')[0]); setDue(item.payload?.due || ''); visitKey.current = item.payload?.idempotencyKey || ''; setVisit(true); pushHistory({action: 'corrected', vendorId: item.payload?.vendorId || '', kind: item.payload?.kind || 'Visit', detail: item.error || 'Opened for correction.'}); writeQueue(readQueue().filter(row => row.payload?.idempotencyKey !== item.payload?.idempotencyKey || row.officialId !== item.officialId)); lookup(item.payload?.vendorId || ''); }}>Correct</button><button type="button" onClick={() => { pushHistory({action: 'dismissed', vendorId: item.payload?.vendorId || '', kind: item.payload?.kind || 'Visit', detail: item.error || 'Dismissed without sending.'}); writeQueue(readQueue().filter(row => row.payload?.idempotencyKey !== item.payload?.idempotencyKey || row.officialId !== item.officialId)); }}>Dismiss</button></section>)}
+            {rejected.map(item => <section className="field-alert" key={'rej-' + (item.payload?.idempotencyKey || item.error) + item.officialId}><strong>Rejected</strong><p>{item.error || 'The register rejected this visit.'}</p><p>{item.payload?.vendorId} · {item.payload?.kind}</p><p>{String(item.payload?.note || '').split('\nVisit GPS')[0]}</p><button type="button" onClick={() => { correcting.current = {key: String(item.payload?.idempotencyKey || ''), payload: item.payload}; setRecovery(false); setNotice('Loading the vendor, then restoring the rejected visit for correction.'); void lookup(String(item.payload?.vendorId || '')); }}>Correct</button><button type="button" onClick={() => { pushHistory({action: 'dismissed', vendorId: item.payload?.vendorId || '', kind: item.payload?.kind || 'Visit', detail: item.error || 'Dismissed without sending.'}); writeQueue(mergeVisit(readQueue(), item.officialId, visitKeyOf(item), null)); }}>Dismiss</button></section>)}
             {held.map(item => <section className="field-sample" key={'held-' + (item.payload?.idempotencyKey || item.error)}><strong>Not assigned to this official</strong><p>{item.error || 'This visit is not tied to the signed-in official and was not sent.'}</p><button type="button" onClick={() => { pushHistory({action: 'dismissed', vendorId: item.payload?.vendorId || '', kind: item.payload?.kind || 'Visit', detail: 'Dismissed unassigned visit.'}); writeQueue(readQueue().filter(row => !( !row.officialId && row.payload?.idempotencyKey === item.payload?.idempotencyKey && row.error === item.error))); }}>Dismiss</button></section>)}
+            <section className="field-panel"><h2>Phone data on this device</h2><p className="muted">Drafts, the visit queue, cached vendor profiles and GPS findings stay in this browser’s local storage for the signed-in official and register address. They are not the municipal register. Keep the phone locked. If the device is lost, sign out other devices from the office register and use Clear phone data below on a replacement handset after signing in.</p><button className="secondary field-wide" type="button" onClick={() => { if (window.confirm('Clear drafts, queued visits, vendor cache and recovery history for this official on this phone?')) clearPhoneData(); }}>Clear phone data for this official</button></section>
             <section className="field-panel"><h2>Dismissal and send history</h2>{history.map(item => <div className="field-entry" key={item.at + item.action + item.vendorId}><div><strong>{item.action}</strong><b>{item.kind}</b></div><p>{item.vendorId}</p><p>{item.detail}</p><small>{date(item.at)}</small></div>)}{!history.length && <p className="muted">No dismissals or successful queue sends yet.</p>}</section>
           </>
         ) : !vendor ? (
@@ -578,7 +664,7 @@ export function App() {
               <p>Check the current registration, location, fee balance and compliance history during your site visit.</p>
             </div>
 
-            {(queued > 0 || rejected.length > 0 || held.length > 0) && <button className="secondary field-wide" type="button" onClick={() => { writeQueue(readQueue()); setRecovery(true); }}>Offline visits · {queued} waiting{rejected.length ? ' · ' + rejected.length + ' rejected' : ''}{held.length ? ' · ' + held.length + ' held' : ''}</button>}
+            <button className="secondary field-wide" type="button" onClick={() => openRecovery()}>Offline recovery{queued || rejected.length || held.length ? ' · ' + queued + ' waiting' + (rejected.length ? ' · ' + rejected.length + ' rejected' : '') + (held.length ? ' · ' + held.length + ' held' : '') : history.length ? ' · history' : ''}</button>
             <button className="field-scan-button" disabled={busy} onClick={() => { setError(''); setScanning(true); }}><Camera size={22} />Scan vendor ID card</button>
             <div className="field-divider"><span>or enter the vendor ID</span></div>
             <form className="field-search" onSubmit={event => { event.preventDefault(); lookup(id); }}>
@@ -599,11 +685,12 @@ export function App() {
         ) : (
           <>
             <button className="field-back" onClick={() => { stashDraft(vendor.id); activeVendor.current = ''; setVendor(null); setVisit(false); setNote(''); setDue(''); setGPS(null); visitKey.current = ''; setError(''); setNotice(''); }}><ChevronLeft size={17} />Scan another card</button>
-            {(queued > 0 || rejected.length > 0) && <button className="secondary field-wide" type="button" onClick={() => { stashDraft(vendor.id); activeVendor.current = ''; setVendor(null); setVisit(false); writeQueue(readQueue()); setRecovery(true); }}>Open offline visit recovery ({queued} waiting{rejected.length ? ', ' + rejected.length + ' rejected' : ''})</button>}
+            <button className="secondary field-wide" type="button" onClick={() => { stashDraft(vendor.id); activeVendor.current = ''; setVendor(null); setVisit(false); openRecovery(); }}>Offline recovery</button>
             <div className="field-vendor-head">
               {portrait ? <img src={portrait} alt={'Profile picture of ' + vendor.name} /> : <span>{vendor.name.split(' ').slice(0, 2).map(part => part[0]).join('')}</span>}
               <div><p className="mono">{vendor.id}</p><h1>{vendor.business}</h1><p>{vendor.name}</p></div>
             </div>
+            {cardWarning && <div className="field-alert" role="alert"><strong>Card status</strong><p>{cardWarning}</p></div>}
             {vendor.sample && <div className="field-sample">Sample vendor · not a municipal record or valid permit</div>}
             <div className="field-status-row">
               <span className={'badge ' + (permit(vendor) === 'Approved' ? 'good' : permit(vendor) === 'Pending review' ? 'amber' : 'bad')}>{permit(vendor)}</span>

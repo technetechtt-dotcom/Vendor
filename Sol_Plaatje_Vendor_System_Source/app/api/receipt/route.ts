@@ -12,13 +12,14 @@ export async function GET(req: Request) {
     const eventId = new URL(req.url).searchParams.get('eventId') || '';
     const event = await db.prepare('SELECT id,vendor_id,kind,amount,note,created_at,actor,receipt_no,pay_method,pay_ref,cashier,reversal_of FROM events WHERE id=?').bind(eventId).first<any>();
     if (!event || event.kind !== 'Payment') return Response.json({error: 'Payment receipt not found.'}, {status: 404});
+    const reversal = await db.prepare("SELECT id,created_at,note,actor FROM events WHERE kind='Reversal' AND reversal_of=?").bind(event.id).first<any>();
     const row = await db.prepare('SELECT payload FROM vendors WHERE id=?').bind(event.vendor_id).first<{payload: string}>();
     const vendor = row ? JSON.parse(row.payload) : {business: event.vendor_id, name: ''};
     const amount = (event.amount / 100).toLocaleString('en-ZA', {style: 'currency', currency: 'ZAR'});
     const lines = [
       'SOL PLAATJE MUNICIPALITY',
       'Local Economic Development',
-      'Payment receipt',
+      reversal ? 'REVERSED payment receipt' : 'Payment receipt',
       '',
       'Receipt ' + (event.receipt_no || 'not numbered'),
       'Vendor ' + (vendor.business || event.vendor_id),
@@ -31,9 +32,12 @@ export async function GET(req: Request) {
       'Recorded ' + event.created_at,
       '',
       event.note,
-      '',
-      'This receipt records a ledger entry. It is not a bank confirmation.',
     ];
+    if (reversal) {
+      lines.push('', 'REVERSED', 'Reversal reference ' + reversal.id, 'Reversed on ' + reversal.created_at + ' by ' + reversal.actor, reversal.note || '');
+    }
+    lines.push('', 'This receipt records a ledger entry. It is not a bank confirmation.');
+    if (reversal) lines.push('This payment has been reversed and must not be treated as an outstanding credit to the trader.');
     const pdf = noticePdf(lines);
     return new Response(pdf, {headers: {'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="receipt-${eventId.slice(0, 8)}.pdf"`, 'Cache-Control': 'private, no-store'}});
   } catch (error) {
