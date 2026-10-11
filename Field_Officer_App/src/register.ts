@@ -32,6 +32,32 @@ export const balance = (id: string, events: Entry[]) => events.filter(event => e
   return total;
 }, 0);
 export const permit = (vendor: Vendor) => vendor.expires && vendor.expires < new Date().toISOString().slice(0, 10) ? 'Expired' : vendor.status;
+export type CardRow = {status: string; cardSerial?: string; createdAt: string};
+export type CardVerdict = {valid: boolean; outcome: 'current' | 'legacy' | 'replaced' | 'revoked' | 'unrecognised' | 'missing-serial'; currentSerial: string; message: string};
+function cardSerial(value: string) { return value.toUpperCase().replace(/[^0-9A-Z .$/+%-]/g, ''); }
+export function decideCard(cards: CardRow[], scannedSerial = ''): CardVerdict {
+  const ordered = [...cards].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  let currentSerial = '', revoked = false;
+  const retired = new Set<string>();
+  for (const card of ordered) {
+    const serial = cardSerial(card.cardSerial || '');
+    if (card.status === 'revoked') { if (currentSerial) retired.add(currentSerial); currentSerial = ''; revoked = true; }
+    else if ((card.status === 'issued' || card.status === 'replacement') && serial) { if (currentSerial && currentSerial !== serial) retired.add(currentSerial); currentSerial = serial; revoked = false; }
+  }
+  const scanned = cardSerial(scannedSerial);
+  if (revoked && !currentSerial) {
+    if (!scanned || retired.has(scanned)) return {valid: false, outcome: 'revoked', currentSerial: '', message: 'This permit card has been revoked and is not a valid card.'};
+    return {valid: false, outcome: 'unrecognised', currentSerial: '', message: 'This serial is not a card recorded for this vendor. The permit is revoked.'};
+  }
+  if (!scanned) {
+    if (currentSerial) return {valid: false, outcome: 'missing-serial', currentSerial, message: 'This card has no serial. The current card is ' + currentSerial + '.'};
+    if (retired.size) return {valid: false, outcome: 'revoked', currentSerial: '', message: 'Earlier cards were replaced or revoked, and no current card serial is on record.'};
+    return {valid: true, outcome: 'legacy', currentSerial: '', message: 'No card serial is on record. The vendor ID is the only identifier on this card.'};
+  }
+  if (currentSerial && scanned === currentSerial) return {valid: true, outcome: 'current', currentSerial, message: 'This is the current card.'};
+  if (retired.has(scanned)) return {valid: false, outcome: currentSerial ? 'replaced' : 'revoked', currentSerial, message: currentSerial ? 'This card was replaced. The current serial is ' + currentSerial + '.' : 'This card was replaced or revoked and is not valid.'};
+  return {valid: false, outcome: 'unrecognised', currentSerial, message: 'This serial is not a card recorded for this vendor.'};
+}
 
 export function getRegisterBase() {
   return localStorage.getItem(STORAGE_KEY) || '';

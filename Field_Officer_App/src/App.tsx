@@ -1,9 +1,10 @@
 import {useEffect, useRef, useState} from 'react';
 import {ScanLine, Search, X, MapPin, ShieldCheck, Wallet, ChevronLeft, Camera, Check, LocateFixed, Wifi, Building2, ClipboardCheck, Loader2, Mail, LogOut} from 'lucide-react';
-import {Vendor, Entry, Delivery, money, balance, permit, getRegisterBase, saveRegisterBase, getToken, getSession, saveSession, clearSession, authHeaders, noticeEmail, noticeText, hydrateSession, openProtected, FieldAccount} from './register';
+import {Vendor, Entry, Delivery, money, balance, permit, decideCard, getRegisterBase, saveRegisterBase, getToken, getSession, saveSession, clearSession, authHeaders, noticeEmail, noticeText, hydrateSession, openProtected, FieldAccount} from './register';
 
 type VisitGPS = {lat: number; lng: number; accuracy: number};
 type QueueItem = {officialId: string; registerBase: string; payload: any; state: 'waiting' | 'rejected'; error: string};
+type HistoryItem = {at: string; action: 'dismissed' | 'sent' | 'corrected'; vendorId: string; kind: string; detail: string};
 
 const date = (value: string) => new Date(value.length === 10 ? value + 'T12:00:00' : value).toLocaleDateString('en-ZA', {day: 'numeric', month: 'short', year: 'numeric'});
 
@@ -37,6 +38,9 @@ export function App() {
   const [queued, setQueued] = useState(0);
   const [rejected, setRejected] = useState<QueueItem[]>([]);
   const [held, setHeld] = useState<QueueItem[]>([]);
+  const [waiting, setWaiting] = useState<QueueItem[]>([]);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [recovery, setRecovery] = useState(false);
   const activeVendor = useRef('');
   const noticeLock = useRef('');
 
@@ -86,9 +90,11 @@ export function App() {
   function writeQueue(items: QueueItem[]) {
     localStorage.setItem('solplaatje.field.visitQueue', JSON.stringify(items));
     const mine = ownQueue(items);
+    setWaiting(mine.filter(item => item.state === 'waiting'));
     setQueued(mine.filter(item => item.state === 'waiting').length);
     setRejected(mine.filter(item => item.state === 'rejected'));
     setHeld(items.filter(item => !item.officialId || !item.registerBase));
+    setHistory(readHistory());
   }
   function readCache(vendorId: string) {
     try { return JSON.parse(localStorage.getItem('solplaatje.field.vendorCache') || '{}')[accountScope()]?.[vendorId] || null; } catch { return null; }
@@ -98,6 +104,19 @@ export function App() {
     const all = JSON.parse(localStorage.getItem('solplaatje.field.vendorCache') || '{}');
     all[accountScope()] = {...(all[accountScope()] || {}), [vendorId]: value};
     localStorage.setItem('solplaatje.field.vendorCache', JSON.stringify(all));
+  }
+  function readHistory(): HistoryItem[] {
+    try {
+      const all = JSON.parse(localStorage.getItem('solplaatje.field.visitHistory') || '{}');
+      return Array.isArray(all[accountScope()]) ? all[accountScope()] : [];
+    } catch { return []; }
+  }
+  function pushHistory(item: Omit<HistoryItem, 'at'>) {
+    const all = JSON.parse(localStorage.getItem('solplaatje.field.visitHistory') || '{}');
+    const mine = [ {at: new Date().toISOString(), ...item}, ...(Array.isArray(all[accountScope()]) ? all[accountScope()] : []) ].slice(0, 40);
+    all[accountScope()] = mine;
+    localStorage.setItem('solplaatje.field.visitHistory', JSON.stringify(all));
+    setHistory(mine);
   }
 
   function requireServer() {
@@ -139,8 +158,8 @@ export function App() {
       const body = await response.json();
       if (response.status === 401) { clearSession(); setSession(null); }
       if (!response.ok) throw new Error(body.error || 'Unable to load this vendor');
-      const currentCard = (body.cards || []).find((card: {status: string; cardSerial: string}) => ['issued', 'replacement'].includes(card.status) && card.cardSerial);
-      if (cardSerial && (!currentCard || String(currentCard.cardSerial).toUpperCase() !== cardSerial)) throw new Error('This card serial is not the current card. It was not opened as the active permit.');
+      const verdict = decideCard(Array.isArray(body.cards) ? body.cards : [], cardSerial);
+      if (cardSerial && !verdict.valid) throw new Error(verdict.message);
       if (activeVendor.current && activeVendor.current !== body.vendor.id) stashDraft(activeVendor.current);
       activeVendor.current = body.vendor.id;
       setVendor(body.vendor);
@@ -149,8 +168,9 @@ export function App() {
       setSenderConnected(Boolean(body.senderConnected));
       setTab('Profile');
       restoreDraft(body.vendor.id);
-      writeCache(body.vendor.id, {vendor: body.vendor, events: body.events, deliveries: body.deliveries || []});
-      if (!cardSerial && currentCard?.cardSerial) setNotice('This card has no serial. The current card serial is ' + currentCard.cardSerial + '.');
+      writeCache(body.vendor.id, {vendor: body.vendor, events: body.events, deliveries: body.deliveries || [], cards: body.cards || []});
+      if (!verdict.valid || verdict.outcome === 'legacy' || verdict.outcome === 'missing-serial') setNotice(verdict.message);
+      else setNotice(verdict.message === 'This is the current card.' ? '' : verdict.message);
     } catch (cause) {
       if (cause instanceof TypeError) {
         const cached = readCache(value);
@@ -205,7 +225,7 @@ export function App() {
         try {
           const response = await fetch(`${base}/api/register`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify(item.payload)});
           const body = await response.json().catch(() => ({}));
-          if (response.ok) { sent++; continue; }
+          if (response.ok) { sent++; pushHistory({action: 'sent', vendorId: item.payload?.vendorId || '', kind: item.payload?.kind || 'Visit', detail: 'Accepted by the register.'}); continue; }
           next.push({...item, state: 'rejected', error: body.error || 'The register rejected this visit (' + response.status + ').'});
         } catch {
           next.push({...item, state: 'waiting', error: ''});
@@ -514,6 +534,41 @@ export function App() {
             <input id="confirm-password" className="block" type="password" autoComplete="new-password" minLength={8} required />
             <button type="submit" disabled={busy}>{busy ? <Loader2 className="spin" size={18} /> : 'Save password'}</button>
           </form>
+        ) : recovery ? (
+          <>
+            <button className="field-back" type="button" onClick={() => setRecovery(false)}><ChevronLeft size={17} />Back to scan</button>
+            <section className="field-panel">
+              <h2>Offline visit recovery</h2>
+              <p className="muted">Rejected visits stay here until you correct them or dismiss them. Waiting visits retry when the register can be reached.</p>
+              <button className="secondary field-wide" type="button" disabled={busy} onClick={async () => {
+                setBusy(true); setError(''); setNotice('');
+                try {
+                  const base = getRegisterBase();
+                  const officialId = getSession()?.id || '';
+                  if (!base || !officialId) throw new Error('Sign in and save the register address first.');
+                  const queue = readQueue();
+                  let sent = 0;
+                  const next = [];
+                  for (const item of queue) {
+                    if (item.officialId !== officialId || item.registerBase !== base || item.state !== 'waiting' || !item.payload?.action) { next.push(item); continue; }
+                    try {
+                      const response = await fetch(base + '/api/register', {method: 'POST', headers: authHeaders(true), body: JSON.stringify(item.payload)});
+                      const body = await response.json().catch(() => ({}));
+                      if (response.ok) { sent++; pushHistory({action: 'sent', vendorId: item.payload?.vendorId || '', kind: item.payload?.kind || 'Visit', detail: 'Accepted by the register.'}); continue; }
+                      next.push({...item, state: 'rejected', error: body.error || ('The register rejected this visit (' + response.status + ').')});
+                    } catch { next.push({...item, state: 'waiting', error: ''}); }
+                  }
+                  writeQueue(next);
+                  setNotice(sent ? sent + ' visit' + (sent === 1 ? '' : 's') + ' sent.' : 'No waiting visits could be sent yet.');
+                } catch (cause) { setError(cause instanceof Error ? cause.message : 'Retry failed.'); }
+                finally { setBusy(false); }
+              }}>Retry waiting visits</button>
+            </section>
+            {waiting.map(item => <section className="field-sample" key={'wait-' + (item.payload?.idempotencyKey || '') + item.officialId}><strong>Waiting to send</strong><p>{item.payload?.vendorId} · {item.payload?.kind}</p><p>{String(item.payload?.note || '').split('\nVisit GPS')[0]}</p></section>)}
+            {rejected.map(item => <section className="field-alert" key={'rej-' + (item.payload?.idempotencyKey || item.error) + item.officialId}><strong>Rejected</strong><p>{item.error || 'The register rejected this visit.'}</p><p>{item.payload?.vendorId} · {item.payload?.kind}</p><p>{String(item.payload?.note || '').split('\nVisit GPS')[0]}</p><button type="button" onClick={() => { setRecovery(false); setId(item.payload?.vendorId || ''); setKind(item.payload?.kind || 'Inspection'); setNote(String(item.payload?.note || '').split('\nVisit GPS')[0]); setDue(item.payload?.due || ''); visitKey.current = item.payload?.idempotencyKey || ''; setVisit(true); pushHistory({action: 'corrected', vendorId: item.payload?.vendorId || '', kind: item.payload?.kind || 'Visit', detail: item.error || 'Opened for correction.'}); writeQueue(readQueue().filter(row => row.payload?.idempotencyKey !== item.payload?.idempotencyKey || row.officialId !== item.officialId)); lookup(item.payload?.vendorId || ''); }}>Correct</button><button type="button" onClick={() => { pushHistory({action: 'dismissed', vendorId: item.payload?.vendorId || '', kind: item.payload?.kind || 'Visit', detail: item.error || 'Dismissed without sending.'}); writeQueue(readQueue().filter(row => row.payload?.idempotencyKey !== item.payload?.idempotencyKey || row.officialId !== item.officialId)); }}>Dismiss</button></section>)}
+            {held.map(item => <section className="field-sample" key={'held-' + (item.payload?.idempotencyKey || item.error)}><strong>Not assigned to this official</strong><p>{item.error || 'This visit is not tied to the signed-in official and was not sent.'}</p><button type="button" onClick={() => { pushHistory({action: 'dismissed', vendorId: item.payload?.vendorId || '', kind: item.payload?.kind || 'Visit', detail: 'Dismissed unassigned visit.'}); writeQueue(readQueue().filter(row => !( !row.officialId && row.payload?.idempotencyKey === item.payload?.idempotencyKey && row.error === item.error))); }}>Dismiss</button></section>)}
+            <section className="field-panel"><h2>Dismissal and send history</h2>{history.map(item => <div className="field-entry" key={item.at + item.action + item.vendorId}><div><strong>{item.action}</strong><b>{item.kind}</b></div><p>{item.vendorId}</p><p>{item.detail}</p><small>{date(item.at)}</small></div>)}{!history.length && <p className="muted">No dismissals or successful queue sends yet.</p>}</section>
+          </>
         ) : !vendor ? (
           <>
             <div className="field-intro">
@@ -522,6 +577,8 @@ export function App() {
               <h1>A card. A scan.<br />The complete vendor record.</h1>
               <p>Check the current registration, location, fee balance and compliance history during your site visit.</p>
             </div>
+
+            {(queued > 0 || rejected.length > 0 || held.length > 0) && <button className="secondary field-wide" type="button" onClick={() => { writeQueue(readQueue()); setRecovery(true); }}>Offline visits · {queued} waiting{rejected.length ? ' · ' + rejected.length + ' rejected' : ''}{held.length ? ' · ' + held.length + ' held' : ''}</button>}
             <button className="field-scan-button" disabled={busy} onClick={() => { setError(''); setScanning(true); }}><Camera size={22} />Scan vendor ID card</button>
             <div className="field-divider"><span>or enter the vendor ID</span></div>
             <form className="field-search" onSubmit={event => { event.preventDefault(); lookup(id); }}>
@@ -542,9 +599,7 @@ export function App() {
         ) : (
           <>
             <button className="field-back" onClick={() => { stashDraft(vendor.id); activeVendor.current = ''; setVendor(null); setVisit(false); setNote(''); setDue(''); setGPS(null); visitKey.current = ''; setError(''); setNotice(''); }}><ChevronLeft size={17} />Scan another card</button>
-            {queued > 0 && <p className="field-help">{queued} visit{queued === 1 ? '' : 's'} saved on this phone, waiting to send.</p>}
-            {rejected.map(item => <section className="field-sample" key={(item.payload?.idempotencyKey || item.error) + item.officialId}><p>{item.error || 'The register rejected this visit.'}</p><p>{item.payload?.vendorId} · {item.payload?.kind}</p><button type="button" onClick={() => { setId(item.payload?.vendorId || ''); setKind(item.payload?.kind || 'Inspection'); setNote(String(item.payload?.note || '').split('\nVisit GPS')[0]); setDue(item.payload?.due || ''); visitKey.current = item.payload?.idempotencyKey || ''; setVisit(true); writeQueue(readQueue().filter(row => row.payload?.idempotencyKey !== item.payload?.idempotencyKey || row.officialId !== item.officialId)); }}>Correct</button><button type="button" onClick={() => writeQueue(readQueue().filter(row => row.payload?.idempotencyKey !== item.payload?.idempotencyKey || row.officialId !== item.officialId))}>Dismiss</button></section>)}
-            {held.map(item => <section className="field-sample" key={'held-' + (item.payload?.idempotencyKey || item.error)}><p>{item.error || 'This visit is not tied to the signed-in official and was not sent.'}</p><button type="button" onClick={() => writeQueue(readQueue().filter(row => row.officialId || row.payload?.idempotencyKey !== item.payload?.idempotencyKey || row.error !== item.error))}>Dismiss</button></section>)}
+            {(queued > 0 || rejected.length > 0) && <button className="secondary field-wide" type="button" onClick={() => { stashDraft(vendor.id); activeVendor.current = ''; setVendor(null); setVisit(false); writeQueue(readQueue()); setRecovery(true); }}>Open offline visit recovery ({queued} waiting{rejected.length ? ', ' + rejected.length + ' rejected' : ''})</button>}
             <div className="field-vendor-head">
               {portrait ? <img src={portrait} alt={'Profile picture of ' + vendor.name} /> : <span>{vendor.name.split(' ').slice(0, 2).map(part => part[0]).join('')}</span>}
               <div><p className="mono">{vendor.id}</p><h1>{vendor.business}</h1><p>{vendor.name}</p></div>
@@ -584,10 +639,10 @@ export function App() {
                 <div className="field-balance"><span>Recorded account balance</span><strong>{money(balance(vendor.id, events))}</strong><p>{balance(vendor.id, events) > 0 ? 'Outstanding fees' : balance(vendor.id, events) < 0 ? 'Credit balance' : 'Account settled'}</p></div>
                 <section className="field-panel">
                   <h2>Charges & received payments</h2>
-                  {events.filter(entry => ['Charge', 'Payment'].includes(entry.kind)).map(entry => (
+                  {events.filter(entry => ['Charge', 'Payment', 'Reversal'].includes(entry.kind)).map(entry => (
                     <div className="field-entry" key={entry.id}><div><strong>{entry.kind}</strong><b>{money(entry.amount)}</b></div><p>{entry.note}</p><small>{date(entry.createdAt)}{entry.due ? ' · Due ' + date(entry.due) : ''}</small></div>
                   ))}
-                  {!events.some(entry => ['Charge', 'Payment'].includes(entry.kind)) && <p className="muted">No charges or payments recorded.</p>}
+                  {!events.some(entry => ['Charge', 'Payment', 'Reversal'].includes(entry.kind)) && <p className="muted">No charges, payments or reversals recorded.</p>}
                 </section>
                 <p className="field-help">Fee balance is separate from permit approval. Field visits do not process payments.</p>
               </>

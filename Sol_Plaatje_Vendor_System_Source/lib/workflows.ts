@@ -1,3 +1,5 @@
+import {calendarDate} from './data';
+
 interface SqlStatement {
   bind(...args: unknown[]): SqlStatement;
   first<T = any>(): Promise<T | null>;
@@ -19,7 +21,7 @@ function text(value: unknown, max: number) {
 }
 
 function dateOk(value: string) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+  return calendarDate(value);
 }
 
 export async function writeAudit(db: Sql, entity: string, entityId: string, action: string, before: unknown, after: unknown, actor: string, stamp: string) {
@@ -84,7 +86,7 @@ export function parseCsv(csv: string) {
 export function validateVendorShape(v: any) {
   if (!v || typeof v.name !== 'string' || !v.name.trim() || typeof v.business !== 'string' || !v.business.trim() || !['Formal', 'Informal'].includes(v.type) || !['Approved', 'Pending review', 'Suspended'].includes(v.status)) throw new Error('Please complete the vendor name, business and registration details.');
   for (const key of ['name', 'business', 'sector', 'hub', 'unit', 'address', 'lat', 'lng', 'phone', 'email', 'issued', 'expires', 'status', 'photo']) if (typeof v[key] !== 'string' || v[key].length > 500) throw new Error('One or more fields are invalid.');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(v.issued) || !/^\d{4}-\d{2}-\d{2}$/.test(v.expires) || v.expires < v.issued) throw new Error('Enter valid permit dates; expiry must follow issue date.');
+  if (!calendarDate(v.issued) || !calendarDate(v.expires) || v.expires < v.issued) throw new Error('Enter real permit dates; expiry must follow the issue date.');
   if (v.type === 'Informal' && (!String(v.lat).trim() || !String(v.lng).trim() || !Number.isFinite(Number(v.lat)) || !Number.isFinite(Number(v.lng)) || Math.abs(Number(v.lat)) > 90 || Math.abs(Number(v.lng)) > 180)) throw new Error('Enter valid GPS coordinates for the informal trader.');
   if (v.type === 'Formal' && (!String(v.hub).trim() || !String(v.unit).trim())) throw new Error('Select a hub and enter the allocated unit.');
   if (!Array.isArray(v.documents) || v.documents.some((item: unknown) => typeof item !== 'string' || item.length > 80)) throw new Error('Invalid document checklist.');
@@ -192,15 +194,23 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     const pitchCode = text(body.pitchCode, 40);
     const lat = text(body.lat, 40);
     const lng = text(body.lng, 40);
+    const verifiedAt = text(body.verifiedAt, 30);
+    const vendorId = text(body.vendorId, 40);
     if (!pitchCode) throw new Error('Enter a pitch reference.');
-    if ((lat || lng) && (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lng)))) throw new Error('Enter valid GPS coordinates.');
+    if ((lat && !lng) || (!lat && lng)) throw new Error('Enter both latitude and longitude, or leave both blank.');
+    if (lat || lng) {
+      const latitude = Number(lat);
+      const longitude = Number(lng);
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) throw new Error('Latitude must be between -90 and 90, and longitude between -180 and 180.');
+    }
+    if (verifiedAt && !dateOk(verifiedAt)) throw new Error('Enter a real date for the GPS check.');
+    if (vendorId && !await db.prepare('SELECT id FROM vendors WHERE id=?').bind(vendorId).first()) throw new Error('Link the pitch to a vendor that is already on the register.');
     const id = text(body.id, 80) || crypto.randomUUID();
     const existing = await db.prepare('SELECT id FROM pitches WHERE id=?').bind(id).first();
-    const values = [text(body.vendorId, 40), pitchCode, text(body.ward, 80), text(body.area, 160), text(body.activity, 120), lat, lng, text(body.accuracy, 40), text(body.verifiedAt, 30)];
+    const values = [vendorId, pitchCode, text(body.ward, 80), text(body.area, 160), text(body.activity, 120), lat, lng, text(body.accuracy, 40), verifiedAt];
     const statements: SqlStatement[] = [existing
       ? db.prepare('UPDATE pitches SET vendor_id=?,pitch_code=?,ward=?,area=?,activity=?,lat=?,lng=?,accuracy=?,verified_at=? WHERE id=?').bind(...values, id)
       : db.prepare('INSERT INTO pitches(vendor_id,pitch_code,ward,area,activity,lat,lng,accuracy,verified_at,id) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(...values, id)];
-    const vendorId = text(body.vendorId, 40);
     let beforeLocation: unknown = null;
     if (vendorId && Number.isFinite(Number(lat)) && Number.isFinite(Number(lng)) && lat && lng) {
       const vendorRow = await db.prepare('SELECT payload FROM vendors WHERE id=?').bind(vendorId).first<{payload: string}>();
@@ -241,8 +251,9 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     const row = await db.prepare('SELECT payload FROM vendors WHERE id=?').bind(vendorId).first<{payload: string}>();
     if (!row) throw new Error('Vendor not found.');
     const vendor = JSON.parse(row.payload);
-    const serial = text(body.cardSerial, 40);
+    const serial = text(body.cardSerial, 40).toUpperCase().replace(/[^0-9A-Z .$/+%-]/g, '');
     if (['issued', 'replacement'].includes(status) && !serial) throw new Error('Enter the card serial number.');
+    if (serial && await db.prepare("SELECT id FROM permits WHERE card_serial<>'' AND upper(card_serial)=?").bind(serial).first()) throw new Error('That card serial is already recorded. Issue or replacement needs a new serial.');
     const expires = text(body.expires, 10);
     if (status === 'renewed' && (!dateOk(expires) || expires < vendor.issued)) throw new Error('Enter the new expiry date.');
     if (status === 'approved') vendor.status = 'Approved';
@@ -306,6 +317,18 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     await writeAudit(db, 'payment', original.id, 'reversed', {kind: original.kind, amount: original.amount}, {reversalId}, actor, stamp);
     return {ok: true, id: reversalId};
   }
+  if (body.action === 'schedule') {
+    const id = text(body.id, 80);
+    const due = text(body.due, 10);
+    const plan = text(body.plan, 500);
+    if (!dateOk(due)) throw new Error('Enter a real date for the next visit.');
+    if (plan.length < 3) throw new Error('Record what the next visit should check.');
+    const open = await db.prepare("SELECT id,due,checklist FROM events WHERE id=? AND kind IN ('Warning','Violation') AND resolved=0").bind(id).first<any>();
+    if (!open) throw new Error('That case is no longer open.');
+    await db.prepare("UPDATE events SET due=?,checklist=?,case_status='follow-up' WHERE id=?").bind(due, plan, id).run();
+    await writeAudit(db, 'case', id, 'scheduled', {due: open.due, plan: open.checklist}, {due, plan}, actor, stamp);
+    return {ok: true};
+  }
   if (body.action === 'transition') {
     const id = text(body.id, 80);
     const caseStatus = text(body.caseStatus, 20);
@@ -347,6 +370,34 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     await writeAudit(db, 'import', batch, 'staged', null, {rows: lines.length}, actor, stamp);
     return {ok: true, batchId: batch};
   }
+  if (body.action === 'edit-import') {
+    const id = text(body.id, 80);
+    const row = await db.prepare('SELECT status,payload FROM import_rows WHERE id=?').bind(id).first<any>();
+    if (!row || row.status === 'approved') throw new Error('An approved import cannot be edited.');
+    if (row.status === 'rejected' && text(body.reopen, 10) !== 'yes') throw new Error('A rejected row stays closed unless you choose to correct it.');
+    const record = JSON.parse(row.payload);
+    for (const key of ['name', 'business', 'type', 'sector', 'hub', 'unit', 'address', 'lat', 'lng', 'phone', 'email', 'issued', 'expires']) {
+      if (typeof body[key] === 'string') record[key] = text(body[key], 500);
+    }
+    let status = 'pending';
+    let note = 'Corrected and ready for approval.';
+    const draft = {id: 'SPM-DRAFT', name: record.name || '', business: record.business || '', type: record.type || '', sector: record.sector || '', hub: record.hub || '', unit: record.unit || '', address: record.address || '', lat: record.lat || '', lng: record.lng || '', phone: record.phone || '', email: record.email || '', issued: record.issued || stamp.slice(0, 10), expires: record.expires || stamp.slice(0, 10), status: 'Pending review', documents: [], files: [], photo: ''};
+    try { validateVendorShape(draft); }
+    catch (error) { status = 'needs-correction'; note = error instanceof Error ? error.message : 'This row still needs correction.'; }
+    await db.prepare("UPDATE import_rows SET payload=?,status=?,note=? WHERE id=? AND status<>'approved'").bind(JSON.stringify(record), status, note.slice(0, 300), id).run();
+    await writeAudit(db, 'import', id, 'edited', {status: row.status}, {status, note}, actor, stamp);
+    return {ok: true, status, note};
+  }
+  if (body.action === 'reject-import') {
+    const id = text(body.id, 80);
+    const note = text(body.note, 300);
+    const row = await db.prepare('SELECT status FROM import_rows WHERE id=?').bind(id).first<any>();
+    if (!row || row.status === 'approved') throw new Error('An approved import cannot be rejected.');
+    if (note.length < 3) throw new Error('Record why this row is rejected.');
+    await db.prepare("UPDATE import_rows SET status='rejected', note=? WHERE id=? AND status<>'approved'").bind(note, id).run();
+    await writeAudit(db, 'import', id, 'rejected', {status: row.status}, {note}, actor, stamp);
+    return {ok: true};
+  }
   if (body.action === 'approve-import') {
     const id = text(body.id, 80);
     const row = await db.prepare("SELECT payload,status FROM import_rows WHERE id=?").bind(id).first<any>();
@@ -358,11 +409,19 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
       address: record.address || '', lat: record.lat || '', lng: record.lng || '', phone: record.phone || '', email: record.email || '',
       issued: record.issued || stamp.slice(0, 10), expires: record.expires || stamp.slice(0, 10), status: 'Pending review', documents: [], files: [], photo: '', sample: false,
     };
-    validateVendorShape(vendor);
+    try { validateVendorShape(vendor); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : 'This row needs correction.';
+      await db.prepare("UPDATE import_rows SET status='needs-correction', note=? WHERE id=? AND status='pending'").bind(message.slice(0, 300), id).run();
+      throw error;
+    }
     let hubId = '';
     if (vendor.type === 'Formal') {
       const hub = await db.prepare('SELECT id FROM hubs WHERE name=?').bind(vendor.hub).first<{id: string}>();
-      if (!hub) throw new Error('The formal row needs a known hub and unit.');
+      if (!hub) {
+        await db.prepare("UPDATE import_rows SET status='needs-correction', note=? WHERE id=? AND status='pending'").bind('The formal row needs a known hub and unit.', id).run();
+        throw new Error('The formal row needs a known hub and unit.');
+      }
       hubId = hub.id;
     }
     const note = 'Imported as ' + vendor.id;
@@ -376,7 +435,7 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     ];
     if (vendor.type === 'Informal' && (vendor.unit || vendor.address)) statements.push(db.prepare('INSERT INTO pitches(id,vendor_id,pitch_code,ward,area,activity,lat,lng,accuracy,verified_at) SELECT ?,?,?,?,?,?,?,?,?,? WHERE ' + claim).bind(crypto.randomUUID(), vendor.id, vendor.unit, '', vendor.address, vendor.sector, vendor.lat, vendor.lng, '', '', id, note));
     statements.push(db.prepare('INSERT INTO audit_log(id,entity,entity_id,action,before_json,after_json,actor,created_at) SELECT ?,?,?,?,?,?,?,? WHERE ' + claim).bind(crypto.randomUUID(), 'import', id, 'approved', JSON.stringify({status: 'pending'}).slice(0, 4000), JSON.stringify({vendorId: vendor.id}).slice(0, 4000), actor, stamp, id, note));
-    statements.push(db.prepare("UPDATE import_rows SET status='pending', note='The unit could not be allocated.' WHERE id=? AND status='approved' AND note=? AND NOT EXISTS (SELECT 1 FROM vendors WHERE id=?)").bind(id, note, vendor.id));
+    statements.push(db.prepare("UPDATE import_rows SET status='needs-correction', note='The unit could not be allocated. Correct the hub and unit, or reject the row.' WHERE id=? AND status='approved' AND note=? AND NOT EXISTS (SELECT 1 FROM vendors WHERE id=?)").bind(id, note, vendor.id));
     await db.batch(statements);
     const done = await db.prepare('SELECT status,note FROM import_rows WHERE id=?').bind(id).first<any>();
     if (!done || done.note !== note) throw new Error('This row was already approved.');
