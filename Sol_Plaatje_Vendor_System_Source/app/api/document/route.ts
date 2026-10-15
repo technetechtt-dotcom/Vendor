@@ -26,8 +26,14 @@ async function handlePost(req: Request) {
   const form = await req.formData();
   const file = form.get('document');
   if (!(file instanceof File) || !types.includes(file.type) || file.size > 8 * 1024 * 1024) return denied(400, 'Use a PDF, JPG, PNG or WebP file under 8 MB.');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const isPdf = bytes.length >= 5 && String.fromCharCode(...bytes.slice(0, 5)) === '%PDF-';
+  const isJpeg = bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  const isPng = bytes.length >= 8 && [137,80,78,71,13,10,26,10].every((n,i) => bytes[i] === n);
+  const isWebp = bytes.length >= 12 && String.fromCharCode(...bytes.slice(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP';
+  if (!((file.type === 'application/pdf' && isPdf) || (file.type === 'image/jpeg' && isJpeg) || (file.type === 'image/png' && isPng) || (file.type === 'image/webp' && isWebp))) return denied(400, 'File content does not match its declared type.');
   const key = crypto.randomUUID();
-  await bucket().put(key, await file.arrayBuffer(), {httpMetadata: {contentType: file.type}});
+  await bucket().put(key, bytes, {httpMetadata: {contentType: file.type}});
   await database().prepare('INSERT INTO attachments(key,kind,vendor_id,label,name,created_by,created_at) VALUES(?,?,?,?,?,?,?)').bind(key, 'document', '', '', file.name.slice(0, 180), account.id, new Date().toISOString()).run();
   return Response.json({file: {id: key, label: '', name: file.name.slice(0, 180), url: '/api/document?key=' + key, contentType: file.type}});
 }
