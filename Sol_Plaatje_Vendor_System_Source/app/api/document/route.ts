@@ -21,6 +21,8 @@ async function handlePost(req: Request) {
   const account = await officeUser(req);
   if (account instanceof Response) return account;
   if (account.role === 'field') return denied(403, 'Field officers cannot upload verification documents.');
+  const origin = req.headers.get('origin');
+  if (origin && origin !== new URL(req.url).origin) return denied(403, 'Invalid request origin.');
   const form = await req.formData();
   const file = form.get('document');
   if (!(file instanceof File) || !types.includes(file.type) || file.size > 8 * 1024 * 1024) return denied(400, 'Use a PDF, JPG, PNG or WebP file under 8 MB.');
@@ -33,8 +35,11 @@ async function handlePost(req: Request) {
 async function handleGet(req: Request) {
   const account = await officeUser(req);
   if (account instanceof Response) return account;
+  if (account.role === 'field') return denied(403, 'Verification documents are restricted to office staff.');
   const key = new URL(req.url).searchParams.get('key');
   if (!key || !/^[a-f0-9-]{36}$/.test(key)) return new Response('Not found', {status: 404});
+  const registered = await database().prepare("SELECT key FROM attachments WHERE key=? AND kind='document'").bind(key).first();
+  if (!registered) return new Response('Not found', {status: 404, headers: {'Cache-Control': 'no-store'}});
   const object = await bucket().get(key);
   if (!object) return new Response('Not found', {status: 404});
   return new Response(object.body, {headers: {'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Content-Disposition': 'inline', 'Cache-Control': 'private, no-store', 'Vary': 'Origin', 'X-Content-Type-Options': 'nosniff'}});
