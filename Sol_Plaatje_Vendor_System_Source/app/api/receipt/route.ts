@@ -9,6 +9,7 @@ export async function GET(req: Request) {
     const account = await sessionUser(db, req);
     if (!account) return Response.json({error: 'Sign in required.'}, {status: 401});
     if (passwordPending(account)) return Response.json({error: 'Change your password before continuing.'}, {status: 403});
+    if (account.role === 'field') return Response.json({error: 'Payment receipts are restricted to office staff.'}, {status: 403, headers: {'Cache-Control': 'no-store'}});
     const eventId = new URL(req.url).searchParams.get('eventId') || '';
     const event = await db.prepare('SELECT id,vendor_id,kind,amount,note,created_at,actor,receipt_no,pay_method,pay_ref,cashier,reversal_of FROM events WHERE id=?').bind(eventId).first<any>();
     if (!event || event.kind !== 'Payment') return Response.json({error: 'Payment receipt not found.'}, {status: 404});
