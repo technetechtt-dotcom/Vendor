@@ -59,12 +59,6 @@ async function handleGet(req: Request) {
 async function handleSetup(req: Request, db: ReturnType<typeof database>, body: any) {
   if (cleartextBlocked(req)) return json({error: 'Administrator setup requires a secure https connection.'}, 400);
   if (!(await setupRequired(db))) return json({error: 'An administrator already exists. Sign in instead.'}, 409);
-  await db.prepare("DELETE FROM app_meta WHERE key='administrator'").run();
-  try {
-    await db.prepare("INSERT INTO app_meta(key,value) VALUES('administrator',?)").bind(new Date().toISOString()).run();
-  } catch {
-    return json({error: 'Administrator setup is already in progress.'}, 409);
-  }
   const name = String(body.name || '').trim().replace(/\s+/g, ' ');
   const email = String(body.email || '').trim().toLowerCase();
   const password = String(body.password || '');
@@ -73,6 +67,11 @@ async function handleSetup(req: Request, db: ReturnType<typeof database>, body: 
   if (password.length < 12) return json({error: 'Choose a password of at least 12 characters.'}, 400);
   if (password.toLowerCase() === email) return json({error: 'Do not use the email address as the password.'}, 400);
   if (await userCount(db)) return json({error: 'An administrator already exists. Sign in instead.'}, 409);
+  // Never remove this claim on incoming setup requests: deleting it permitted
+  // concurrent clients to race to become the first superuser.
+  const claim = await db.prepare("INSERT OR IGNORE INTO app_meta(key,value) VALUES('administrator',?)")
+    .bind(new Date().toISOString()).run();
+  if (!claim.meta?.changes) return json({error: 'Administrator setup was already claimed. Contact the system administrator if initial setup failed.'}, 409);
   const id = crypto.randomUUID();
   await db.prepare('INSERT INTO users(id,name,email,password_hash,role,active,created_at,must_change_password) VALUES(?,?,?,?,?,?,?,0)')
     .bind(id, name, email, await hashPassword(password), 'superuser', 1, new Date().toISOString()).run();
@@ -83,6 +82,10 @@ async function handleSetup(req: Request, db: ReturnType<typeof database>, body: 
 async function handlePost(req: Request) {
   const db = database();
   await ensureAccounts(db);
+  const origin = req.headers.get('origin');
+  if (origin && origin !== new URL(req.url).origin && !fieldCorsHeaders(req)) {
+    return json({error: 'Invalid request origin.'}, 403);
+  }
   let body: any;
   try {
     body = await req.json();
