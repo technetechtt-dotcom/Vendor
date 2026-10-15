@@ -41,6 +41,8 @@ async function handleGet(req: Request) {
   if (account instanceof Response) return account;
   const key = new URL(req.url).searchParams.get('key');
   if (!key || !/^[a-f0-9-]{36}$/.test(key)) return new Response('Not found', {status: 404, headers: {'Cache-Control': 'no-store'}});
+  const registered = await database().prepare("SELECT key FROM attachments WHERE key=? AND kind='photo'").bind(key).first();
+  if (!registered) return new Response('Not found', {status: 404, headers: {'Cache-Control': 'no-store'}});
   const object = await bucket().get(key);
   if (!object) return new Response('Not found', {status: 404, headers: {'Cache-Control': 'no-store'}});
   return new Response(object.body, {headers: imageHeaders(object.httpMetadata?.contentType || 'image/jpeg')});
