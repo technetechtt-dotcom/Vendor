@@ -28,14 +28,24 @@ jobs:
             Field_Officer_App/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: npm ci --prefix ../Field_Officer_App --no-audit --no-fund
+      - run: npm audit --omit=dev --audit-level=high
       - run: npm run lint -- --max-warnings=0
       - run: npm run typecheck
       - run: npm test
+      - run: npx playwright install --with-deps chromium
       - run: npm run local:setup
       - name: Exercise live authentication and operational workflows
         run: |
           npm run dev -- --port 5173 > /tmp/vendor-preview.log 2>&1 &
-          node tests/http-smoke.mjs
+          npm run dev --prefix ../Field_Officer_App > /tmp/vendor-field-preview.log 2>&1 &
+          node tests/browser-smoke.mjs
+      - name: Preserve browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-evidence
+          path: Sol_Plaatje_Vendor_System_Source/test-results/
+          if-no-files-found: ignore
       - name: Preserve preview diagnostics
         if: failure()
         uses: actions/upload-artifact@v4

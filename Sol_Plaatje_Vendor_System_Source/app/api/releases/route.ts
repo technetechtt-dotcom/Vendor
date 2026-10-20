@@ -1,5 +1,5 @@
 import {database} from '../../../lib/server';
-import {FIELD_APP_FILE, FIELD_APP_VERSION} from '../../../lib/field-app';
+import {FIELD_APP_FILE, FIELD_APP_VERSION, FIELD_APP_AVAILABLE, FIELD_APP_CHECKSUM} from '../../../lib/field-app';
 import {passwordPending, sessionUser} from '../../../lib/accounts';
 import {can} from '../../../lib/capabilities';
 import {mutationOriginError} from '../../../lib/cors';
@@ -21,7 +21,7 @@ function json(body: unknown, status = 200) {
 }
 
 export async function GET() {
-  return json({version: VERSION, expected: 'releases/' + FILE_NAME, publish: RELEASE_NOTES});
+  return json({version: VERSION, available: FIELD_APP_AVAILABLE, sha256: FIELD_APP_CHECKSUM, expected: 'releases/' + FILE_NAME, publish: RELEASE_NOTES});
 }
 
 /** Static release packages are published through the deployment build. */

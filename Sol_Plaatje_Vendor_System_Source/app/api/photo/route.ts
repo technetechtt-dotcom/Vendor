@@ -1,3 +1,4 @@
+import {withOperationalLease} from '../../../lib/write-lease';
 import {bucket, database} from '../../../lib/server';
 import {passwordPending, sessionUser} from '../../../lib/accounts';
 import {fieldCorsHeaders, withFieldCors} from '../../../lib/cors';
@@ -60,7 +61,7 @@ export function OPTIONS(req: Request) {
 }
 
 export function POST(req: Request) {
-  return handlePost(req).then(res => withFieldCors(req, res)).catch(error => {
+  return withOperationalLease(req, () => handlePost(req)).then(res => withFieldCors(req, res)).catch(error => {
     console.error(error);
     return withFieldCors(req, denied(503, 'The photo could not be uploaded. Try again.'));
   });

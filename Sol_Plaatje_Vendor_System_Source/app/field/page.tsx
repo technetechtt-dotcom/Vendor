@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import {FIELD_APP_ASSET_PATH, FIELD_APP_FILE, FIELD_APP_VERSION} from '../../lib/field-app';
+import {FIELD_APP_ASSET_PATH, FIELD_APP_FILE, FIELD_APP_VERSION, FIELD_APP_AVAILABLE} from '../../lib/field-app';
 
 export default function FieldHelp() {
   return (
@@ -7,7 +7,7 @@ export default function FieldHelp() {
       <p className="eyebrow">LED FIELD VISITS</p>
       <h1>Install the field visits app</h1>
       <p>Site visits, card scans and notices are recorded in the Android app, version {FIELD_APP_VERSION}. The office register stays on this website.</p>
-      <p><a className="primary" href={FIELD_APP_ASSET_PATH} download>Download {FIELD_APP_FILE}</a></p>
+      {FIELD_APP_AVAILABLE ? <p><a className="primary" href={FIELD_APP_ASSET_PATH} download>Download {FIELD_APP_FILE}</a></p> : <p role="status">The updated signed release is awaiting publication by the LED office. Ask your administrator for the approved installation package.</p>}
       <p className="hint">Use only a package approved and signed by the LED office. Ask your administrator if installation is blocked or the download is unavailable.</p>
       <h2>Setup</h2>
       <ul>

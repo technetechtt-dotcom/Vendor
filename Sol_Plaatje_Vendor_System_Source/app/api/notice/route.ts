@@ -1,3 +1,4 @@
+import {withOperationalLease} from '../../../lib/write-lease';
 import {readJsonObject} from '../../../lib/request';
 import {database, noticeWebhook} from '../../../lib/server';
 import {passwordPending, sessionUser} from '../../../lib/accounts';
@@ -154,7 +155,7 @@ export function GET(req: Request) {
 }
 
 export function POST(req: Request) {
-  return handlePost(req).then(res => withFieldCors(req, res)).catch(error => {
+  return withOperationalLease(req, () => handlePost(req)).then(res => withFieldCors(req, res)).catch(error => {
     console.error(error);
     return withFieldCors(req, json({error: 'The notice record could not be saved.'}, 503));
   });

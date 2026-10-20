@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -56,4 +57,16 @@ console.log('Versioned package written to', released);
 if (!release) {
   console.log('NOTE: this package is debug-signed and is published under a -debug name.');
   console.log('The download link serves the release build. Run npm run apk:release to replace it.');
+}
+
+if (release) {
+  const versions = fs.readdirSync(path.join(androidHome, 'build-tools')).sort((a,b) => a.localeCompare(b, undefined, {numeric:true}));
+  const signer = path.join(androidHome, 'build-tools', versions.at(-1), process.platform === 'win32' ? 'apksigner.bat' : 'apksigner');
+  const checked = spawnSync(signer, ['verify', '--verbose', '--print-certs', released], {encoding:'utf8', shell:process.platform === 'win32'});
+  if (checked.status !== 0) {console.error('Release signature verification failed.'); process.exit(1);}
+  const certificate = /Signer #1 certificate SHA-256 digest: ([0-9a-f]+)/i.exec(checked.stdout)?.[1];
+  if (!certificate) throw new Error('The signing certificate fingerprint could not be verified.');
+  const digest = createHash('sha256').update(fs.readFileSync(released)).digest('hex');
+  fs.writeFileSync(released.replace(/\.apk$/, '.json'), JSON.stringify({version, file:path.basename(released), sha256:digest, certificateSha256:certificate, signatureVerified:true},null,2)+'\n');
+  console.log('Release signature and package checksum verified.');
 }

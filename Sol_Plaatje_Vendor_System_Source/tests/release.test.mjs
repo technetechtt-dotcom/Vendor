@@ -9,6 +9,7 @@ import {runScenarios} from './scenarios.mjs';
 
 const moduleUrls = new Map();
 function moduleUrl(file) {
+  if (file.pathname.endsWith('.json')) return 'data:text/javascript;base64,' + Buffer.from('export default ' + readFileSync(file, 'utf8')).toString('base64');
   if (file.pathname.endsWith('/lib/server.ts')) return 'data:text/javascript;base64,' + Buffer.from(`export const database=()=>globalThis.__vendorTestEnvironment.db; export const bucket=()=>globalThis.__vendorTestEnvironment.store; export const bootstrapToken=()=>globalThis.__vendorTestEnvironment.bootstrap||''; export const noticeWebhook=()=>'';`).toString('base64');
   if (moduleUrls.has(file.href)) return moduleUrls.get(file.href);
   const source = ts.transpileModule(readFileSync(file, 'utf8'), {compilerOptions: {module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022}}).outputText;
@@ -21,7 +22,7 @@ function moduleUrl(file) {
     if (spec && ts.isStringLiteral(spec)) {
       const name = spec.text;
       let resolved = name;
-      if (name.startsWith('.')) resolved = moduleUrl(new URL(name.endsWith('.ts') || name.endsWith('.mjs') ? name : name + '.ts', file));
+      if (name.startsWith('.')) resolved = moduleUrl(new URL(name.endsWith('.ts') || name.endsWith('.mjs') || name.endsWith('.json') ? name : name + '.ts', file));
       else if (!name.startsWith('node:')) resolved = pathToFileURL(require.resolve(name)).href;
       edits.push([spec.getStart(ast), spec.end, JSON.stringify(resolved)]);
     }
@@ -205,4 +206,21 @@ test('authenticated acceptance flow exercises all roles and operational route ha
     });
     assert.equal(result.checks.length, 16);
   } finally {environment.sqlite.close(); delete globalThis.__vendorTestEnvironment;}
+});
+
+test('operational write lease excludes concurrent writers and stale owners cannot release a newer claim', async () => {
+  const {sqlite, db} = fixture();
+  globalThis.__vendorTestEnvironment = {db};
+  const {acquireOperationLease, releaseOperationLease} = await loadModule('../lib/write-lease.ts');
+  const now = Date.now();
+  const first = await acquireOperationLease(db, now);
+  assert.ok(first);
+  assert.equal(await acquireOperationLease(db, now + 1000), null);
+  const replacement = await acquireOperationLease(db, now + 301000);
+  assert.ok(replacement);
+  await releaseOperationLease(db, first);
+  assert.equal(await acquireOperationLease(db, now + 302000), null);
+  await releaseOperationLease(db, replacement);
+  assert.ok(await acquireOperationLease(db, now + 303000));
+  sqlite.close(); delete globalThis.__vendorTestEnvironment;
 });

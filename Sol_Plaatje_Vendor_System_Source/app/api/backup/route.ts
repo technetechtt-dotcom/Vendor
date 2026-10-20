@@ -1,3 +1,4 @@
+import {withOperationalLease} from '../../../lib/write-lease';
 import {readJsonObject} from '../../../lib/request';
 import {bucket, database} from '../../../lib/server';
 import {passwordPending, sessionUser} from '../../../lib/accounts';
@@ -44,7 +45,7 @@ export async function GET(req: Request) {
   }
 }
 
-export async function POST(req: Request) {
+async function handlePost(req: Request) {
   const rejected = mutationOriginError(req);
   if (rejected) return rejected;
   try {
@@ -69,3 +70,5 @@ export async function POST(req: Request) {
     return json({error: error instanceof Error ? error.message : 'The backup could not be verified.'}, 400);
   }
 }
+
+export function POST(req: Request) {return withOperationalLease(req, () => handlePost(req));}

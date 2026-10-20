@@ -1,7 +1,7 @@
 {
   "name": "led-field-visits",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "scripts": {
     "dev": "node scripts/run-vite.mjs --port 5174 --host 127.0.0.1",

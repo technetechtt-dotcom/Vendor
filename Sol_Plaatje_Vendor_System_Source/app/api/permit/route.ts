@@ -1,3 +1,4 @@
+import {withOperationalLease} from '../../../lib/write-lease';
 import {readJsonObject} from '../../../lib/request';
 import {mutationOriginError} from '../../../lib/cors';
 import {database} from '../../../lib/server';
@@ -102,7 +103,7 @@ export async function GET(req: Request) {
 }
 
 /** Card and permit lifecycle events that are not a permit decision. */
-export async function POST(req: Request) {
+async function handlePost(req: Request) {
   const rejected = mutationOriginError(req);
   if (rejected) return rejected;
   try {
@@ -142,3 +143,5 @@ export async function POST(req: Request) {
     return json({error: 'The card event could not be recorded.'}, 503);
   }
 }
+
+export function POST(req: Request) {return withOperationalLease(req, () => handlePost(req));}

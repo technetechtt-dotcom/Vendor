@@ -1,3 +1,4 @@
+import {withOperationalLease} from '../../../lib/write-lease';
 import {z} from 'zod';
 import { bucket, database, noticeWebhook } from '../../../lib/server';
 import { samples,sampleEvents,calendarDate } from '../../../lib/data';
@@ -18,4 +19,4 @@ if(b.action==='hub'){const name=typeof b.name==='string'?b.name.trim().replace(/
 const operated=await applyOperation(db,account,b,now());if(operated){await sealAuditTail(db);const removed=(operated as {removed?:unknown}).removed;if(Array.isArray(removed)){for(const key of removed){try{await bucket().delete(key);}catch{/* The register row is already removed. */}}}return Response.json(operated);}return Response.json({error:'Unknown action'},{status:400});}catch(e){console.error(e);return Response.json({error:e instanceof Error?e.message:'Could not save this entry. Please try again.'},{status:400});}}
 export function OPTIONS(req:Request){const headers=fieldCorsHeaders(req);if(!headers)return new Response(null,{status:403});return new Response(null,{status:204,headers});}
 export function GET(req:Request){return handleGet(req).then(res=>withFieldCors(req,res));}
-export function POST(req:Request){return handlePost(req).then(res=>withFieldCors(req,res));}
+export function POST(req:Request){return withOperationalLease(req,()=>handlePost(req)).then(res=>withFieldCors(req,res));}

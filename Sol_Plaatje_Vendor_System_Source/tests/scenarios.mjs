@@ -24,6 +24,7 @@ export async function runScenarios(send, base = 'https://staging.example') {
   assert.equal(setup.user.role, 'superuser');
   await call('/api/auth', {action: 'setup', name: 'Duplicate', email: 'duplicate@example.invalid', password: secret(), setupToken: bootstrap}, '', 409);
   const accounts = {};
+  const credentials = {};
   for (const role of ['office', 'finance', 'field']) {
     const password = secret();
     const email = role + '@example.invalid';
@@ -31,7 +32,9 @@ export async function runScenarios(send, base = 'https://staging.example') {
     const login = await call('/api/auth', {action: 'login', email, password});
     assert.equal(login.user.mustChangePassword, true);
     await call('/api/register', undefined, login.token, 403);
-    const changed = await call('/api/auth', {action: 'change-password', currentPassword: password, password: secret()}, login.token);
+    const newPassword = secret();
+    const changed = await call('/api/auth', {action: 'change-password', currentPassword: password, password: newPassword}, login.token);
+    credentials[role] = {email, password: newPassword};
     assert.equal(changed.user.mustChangePassword, false);
     accounts[role] = login.token;
   }
@@ -81,5 +84,5 @@ export async function runScenarios(send, base = 'https://staging.example') {
     const response = await send(new Request(base + path, {method: 'POST', headers: {origin: 'https://hostile.example', 'Content-Type': 'application/json'}, body: '{}'}));
     assert.equal(response.status, 403, path + ': hostile origin was accepted');
   }
-  return {vendorId, checks: ['bootstrap', 'temporary passwords', 'all four roles', 'registration', 'allocation conflict', 'lookup', 'fees', 'payment replay', 'reconciliation', 'permit/card lifecycle', 'notice permissions', 'case resolution', 'audit seal', 'backup verification', 'sessions', 'hostile origins']};
+  return {vendorId, ownerToken: owner, fieldCredentials: credentials.field, checks: ['bootstrap', 'temporary passwords', 'all four roles', 'registration', 'allocation conflict', 'lookup', 'fees', 'payment replay', 'reconciliation', 'permit/card lifecycle', 'notice permissions', 'case resolution', 'audit seal', 'backup verification', 'sessions', 'hostile origins']};
 }

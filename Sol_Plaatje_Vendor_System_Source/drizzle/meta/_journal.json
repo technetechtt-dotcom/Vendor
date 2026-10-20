@@ -43,6 +43,34 @@
       "when": 1791400000000,
       "tag": "0005_card_serial",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792022400006,
+      "tag": "0006_audit_integrity",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1792022400007,
+      "tag": "0007_permits_and_renewals",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1792022400008,
+      "tag": "0008_integrity_and_recovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1792022400009,
+      "tag": "0009_write_coordination",
+      "breakpoints": true
     }
   ]
 }

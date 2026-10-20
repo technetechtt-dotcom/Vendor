@@ -1,3 +1,4 @@
+import {withOperationalLease} from '../../../lib/write-lease';
 import {readJsonObject} from '../../../lib/request';
 import {mutationOriginError} from '../../../lib/cors';
 import {database} from '../../../lib/server';
@@ -42,7 +43,7 @@ async function scan(db: ReturnType<typeof database>, actor: string, actorId: str
  * reminder per vendor per expiry date, so the same renewal is never queued twice
  * and the task list shows who has to act.
  */
-export async function POST(req: Request) {
+async function handlePost(req: Request) {
   const rejected = mutationOriginError(req);
   if (rejected) return rejected;
   try {
@@ -84,3 +85,5 @@ export async function POST(req: Request) {
     return json({error: 'The renewal scan could not be completed.'}, 503);
   }
 }
+
+export function POST(req: Request) {return withOperationalLease(req, () => handlePost(req));}
