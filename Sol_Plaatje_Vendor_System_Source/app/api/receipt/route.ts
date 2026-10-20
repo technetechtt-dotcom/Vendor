@@ -1,19 +1,18 @@
 import {database} from '../../../lib/server';
-import {ensureAccounts, passwordPending, sessionUser} from '../../../lib/accounts';
+import {passwordPending, sessionUser} from '../../../lib/accounts';
 import {noticePdf} from '../../../lib/notices';
 
 export async function GET(req: Request) {
   try {
     const db = database();
-    await ensureAccounts(db);
     const account = await sessionUser(db, req);
     if (!account) return Response.json({error: 'Sign in required.'}, {status: 401});
     if (passwordPending(account)) return Response.json({error: 'Change your password before continuing.'}, {status: 403});
     if (account.role === 'field') return Response.json({error: 'Payment receipts are restricted to office staff.'}, {status: 403, headers: {'Cache-Control': 'no-store'}});
     const eventId = new URL(req.url).searchParams.get('eventId') || '';
-    const event = await db.prepare('SELECT id,vendor_id,kind,amount,note,created_at,actor,receipt_no,pay_method,pay_ref,cashier,reversal_of FROM events WHERE id=?').bind(eventId).first<any>();
+    const event = await db.prepare('SELECT id,vendor_id,kind,amount,note,created_at,actor,receipt_no,pay_method,pay_ref,cashier,reversal_of FROM events WHERE id=?').bind(eventId).first<{id: string; vendor_id: string; kind: string; amount: number; note: string; created_at: string; actor: string; receipt_no: string; pay_method: string; pay_ref: string; cashier: string; reversal_of: string}>();
     if (!event || event.kind !== 'Payment') return Response.json({error: 'Payment receipt not found.'}, {status: 404});
-    const reversal = await db.prepare("SELECT id,created_at,note,actor FROM events WHERE kind='Reversal' AND reversal_of=?").bind(event.id).first<any>();
+    const reversal = await db.prepare("SELECT id,created_at,note,actor FROM events WHERE kind='Reversal' AND reversal_of=?").bind(event.id).first<{id: string; created_at: string; note: string; actor: string}>();
     const row = await db.prepare('SELECT payload FROM vendors WHERE id=?').bind(event.vendor_id).first<{payload: string}>();
     const vendor = row ? JSON.parse(row.payload) : {business: event.vendor_id, name: ''};
     const amount = (event.amount / 100).toLocaleString('en-ZA', {style: 'currency', currency: 'ZAR'});

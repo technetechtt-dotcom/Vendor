@@ -1,5 +1,6 @@
+import {readJsonObject} from '../../../lib/request';
 import {bucket, database} from '../../../lib/server';
-import {ensureAccounts, passwordPending, sessionUser} from '../../../lib/accounts';
+import {passwordPending, sessionUser} from '../../../lib/accounts';
 import {buildSnapshot, restoreSnapshot, verifySnapshot} from '../../../lib/backup';
 import {writeAudit} from '../../../lib/workflows';
 import {mutationOriginError} from '../../../lib/cors';
@@ -12,7 +13,6 @@ function json(body: unknown, status = 200, extra?: HeadersInit) {
 
 async function superUser(req: Request) {
   const db = database();
-  await ensureAccounts(db);
   const account = await sessionUser(db, req);
   if (!account) return json({error: 'Sign in required.'}, 401);
   if (passwordPending(account)) return json({error: 'Change your password before continuing.'}, 403);
@@ -50,20 +50,20 @@ export async function POST(req: Request) {
   try {
     const viewer = await superUser(req);
     if (viewer instanceof Response) return viewer;
-    const body: any = await req.json().catch(() => null);
-    if (!body || !['verify', 'restore'].includes(body.action)) return json({error: 'Unknown action.'}, 400);
+    const body = await readJsonObject(req);
+    if (!body || !['verify', 'restore'].includes(String(body.action))) return json({error: 'Unknown action.'}, 400);
     const document = body.document;
     if (!document || typeof document !== 'object') return json({error: 'Attach the exported backup document to verify.'}, 400);
     const result = await verifySnapshot(document);
     const stamp = new Date().toISOString();
     if (body.action === 'verify') {
-      await writeAudit(viewer.db, 'backup', document.generatedAt || stamp, 'verified', null, {ok: result.ok, counts: result.counts}, viewer.account.name, stamp, viewer.account.id);
+      await writeAudit(viewer.db, 'backup', String((document as Record<string, unknown>).generatedAt || stamp), 'verified', null, {ok: result.ok, counts: result.counts}, viewer.account.name, stamp, viewer.account.id);
       return json(result);
     }
     if (!result.restorable) return json({error: 'Only a verified version 2 backup can be restored.', ...result}, 400);
     if (String(body.confirmation || '') !== result.confirmation) return json({error: `Type ${result.confirmation} to confirm this restore.`}, 400);
     const restored = await restoreSnapshot(viewer.db, bucket(), document);
-    await writeAudit(viewer.db, 'backup', document.generatedAt || stamp, 'restored', null, {checksum: restored.checksum, counts: restored.counts, objects: restored.objects}, viewer.account.name, stamp, viewer.account.id);
+    await writeAudit(viewer.db, 'backup', String((document as Record<string, unknown>).generatedAt || stamp), 'restored', null, {checksum: restored.checksum, counts: restored.counts, objects: restored.objects}, viewer.account.name, stamp, viewer.account.id);
     return json({ok: true, ...restored});
   } catch (error) {
     return json({error: error instanceof Error ? error.message : 'The backup could not be verified.'}, 400);

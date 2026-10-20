@@ -5,7 +5,7 @@ import {Capability} from '../lib/capabilities';
 
 type Tariff = {id: string; category: string; amountCents: number; approvalRef: string};
 
-export function Reports({vendors, entries, tariffs, can}: {vendors: Vendor[]; entries: Entry[]; tariffs: Tariff[]; can: (capability: Capability) => boolean}) {
+export function Reports({vendors, entries, tariffs}: {vendors: Vendor[]; entries: Entry[]; tariffs: Tariff[]; can: (capability: Capability) => boolean}) {
   const [from, setFrom] = useState(monthStart());
   const [to, setTo] = useState(monthEnd());
   const [months, setMonths] = useState(6);

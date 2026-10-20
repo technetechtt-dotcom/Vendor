@@ -1,6 +1,7 @@
+import {privateStorage, privateStorageReady, flushPrivateStorage, lockPrivateStorage} from './secure-storage';
 import {useEffect, useRef, useState} from 'react';
 import {ScanLine, Search, X, MapPin, ShieldCheck, Wallet, ChevronLeft, Camera, Check, LocateFixed, Wifi, Building2, ClipboardCheck, Loader2, Mail, LogOut} from 'lucide-react';
-import {Vendor, Entry, Delivery, money, balance, permit, decideCard, getRegisterBase, saveRegisterBase, getToken, getSession, saveSession, clearSession, authHeaders, noticeEmail, noticeText, hydrateSession, openProtected, SessionExpiredError, hasPin, setPin, unlockWithPin, clearPin, resetPhone, FieldAccount} from './register';
+import {Vendor, Entry, Delivery, money, balance, permit, decideCard, getRegisterBase, saveRegisterBase, getToken, getSession, saveSession, clearSession, authHeaders, noticeEmail, noticeText, hydrateSession, openProtected, SessionExpiredError, hasPin, setPin, unlockWithPin, resetPhone, FieldAccount} from './register';
 
 type VisitGPS = {lat: number; lng: number; accuracy: number};
 type QueueItem = {officialId: string; registerBase: string; payload: any; state: 'waiting' | 'rejected'; error: string};
@@ -53,11 +54,17 @@ export function App() {
   const syncLock = useRef(false);
   const correcting = useRef<{key: string; payload: any} | null>(null);
 
+  useEffect(() => {
+    const report = () => setError('Encrypted phone storage could not be saved. Keep the app open and check available space before retrying.');
+    window.addEventListener('field-storage-error', report);
+    return () => window.removeEventListener('field-storage-error', report);
+  }, []);
+
   function accountScope() {
     return (getRegisterBase() || '') + '|' + (getSession()?.id || '');
   }
   function readDraftStore() {
-    try { return JSON.parse(localStorage.getItem('solplaatje.field.visitDrafts') || '{}'); } catch { return {}; }
+    try { return JSON.parse(privateStorage.getItem('solplaatje.field.visitDrafts') || '{}'); } catch { return {}; }
   }
   function readDrafts() {
     const mine = readDraftStore()[accountScope()];
@@ -66,7 +73,7 @@ export function App() {
   function writeDrafts(mine: Record<string, any>) {
     const all = readDraftStore();
     all[accountScope()] = mine;
-    localStorage.setItem('solplaatje.field.visitDrafts', JSON.stringify(all));
+    privateStorage.setItem('solplaatje.field.visitDrafts', JSON.stringify(all));
   }
   function stashDraft(vendorId?: string) {
     if (!vendorId || !getSession()?.id) return;
@@ -77,7 +84,7 @@ export function App() {
   }
   function readQueue(): QueueItem[] {
     try {
-      const parsed = JSON.parse(localStorage.getItem('solplaatje.field.visitQueue') || '[]');
+      const parsed = JSON.parse(privateStorage.getItem('solplaatje.field.visitQueue') || '[]');
       if (!Array.isArray(parsed)) return [];
       return parsed.map((item: any) => item?.payload && item.officialId !== undefined ? item : {officialId: '', registerBase: '', payload: item, state: 'rejected' as const, error: 'This visit was saved before it was tied to an official and register. It was not sent.'});
     } catch { return []; }
@@ -88,7 +95,8 @@ export function App() {
     return items.filter(item => item.officialId === officialId && item.registerBase === base);
   }
   function writeQueue(items: QueueItem[]) {
-    localStorage.setItem('solplaatje.field.visitQueue', JSON.stringify(items));
+    if (!privateStorageReady()) return;
+    privateStorage.setItem('solplaatje.field.visitQueue', JSON.stringify(items));
     const mine = ownQueue(items);
     setWaiting(mine.filter(item => item.state === 'waiting'));
     setQueued(mine.filter(item => item.state === 'waiting').length);
@@ -97,25 +105,25 @@ export function App() {
     setHistory(readHistory());
   }
   function readCache(vendorId: string) {
-    try { return JSON.parse(localStorage.getItem('solplaatje.field.vendorCache') || '{}')[accountScope()]?.[vendorId] || null; } catch { return null; }
+    try { return JSON.parse(privateStorage.getItem('solplaatje.field.vendorCache') || '{}')[accountScope()]?.[vendorId] || null; } catch { return null; }
   }
   function writeCache(vendorId: string, value: unknown) {
     if (!getSession()?.id) return;
-    const all = JSON.parse(localStorage.getItem('solplaatje.field.vendorCache') || '{}');
+    const all = JSON.parse(privateStorage.getItem('solplaatje.field.vendorCache') || '{}');
     all[accountScope()] = {...(all[accountScope()] || {}), [vendorId]: value};
-    localStorage.setItem('solplaatje.field.vendorCache', JSON.stringify(all));
+    privateStorage.setItem('solplaatje.field.vendorCache', JSON.stringify(all));
   }
   function readHistory(): HistoryItem[] {
     try {
-      const all = JSON.parse(localStorage.getItem('solplaatje.field.visitHistory') || '{}');
+      const all = JSON.parse(privateStorage.getItem('solplaatje.field.visitHistory') || '{}');
       return Array.isArray(all[accountScope()]) ? all[accountScope()] : [];
     } catch { return []; }
   }
   function pushHistory(item: Omit<HistoryItem, 'at'>) {
-    const all = JSON.parse(localStorage.getItem('solplaatje.field.visitHistory') || '{}');
+    const all = JSON.parse(privateStorage.getItem('solplaatje.field.visitHistory') || '{}');
     const mine = [{at: new Date().toISOString(), ...item}, ...(Array.isArray(all[accountScope()]) ? all[accountScope()] : [])].slice(0, 100);
     all[accountScope()] = mine;
-    localStorage.setItem('solplaatje.field.visitHistory', JSON.stringify(all));
+    privateStorage.setItem('solplaatje.field.visitHistory', JSON.stringify(all));
     setHistory(mine);
   }
   function restoreDraft(vendorId: string) {
@@ -158,7 +166,7 @@ export function App() {
     return {state: 'rejected', error: body?.error || ('The register rejected this visit (' + status + ').')};
   }
   async function syncQueue(manual = false) {
-    if (syncLock.current) return;
+    if (syncLock.current || locked || !privateStorageReady()) return;
     const base = getRegisterBase();
     const officialId = getSession()?.id || '';
     if (!base || !getToken() || !officialId) return;
@@ -213,10 +221,10 @@ export function App() {
     const scope = accountScope();
     for (const key of ['solplaatje.field.visitDrafts', 'solplaatje.field.vendorCache', 'solplaatje.field.visitHistory']) {
       try {
-        const all = JSON.parse(localStorage.getItem(key) || '{}');
+        const all = JSON.parse(privateStorage.getItem(key) || '{}');
         if (all && typeof all === 'object' && !Array.isArray(all)) {
           delete all[scope];
-          localStorage.setItem(key, JSON.stringify(all));
+          privateStorage.setItem(key, JSON.stringify(all));
         }
       } catch { /* keep going */ }
     }
@@ -331,12 +339,13 @@ export function App() {
   }, [vendor?.id, note, due, kind, gps]);
 
   useEffect(() => {
+    if (locked || !privateStorageReady()) return;
     writeQueue(readQueue());
     void syncQueue(false);
     const onOnline = () => { void syncQueue(false); };
     window.addEventListener('online', onOnline);
     return () => window.removeEventListener('online', onOnline);
-  }, [session?.id]);
+  }, [session?.id, locked, pinReady]);
 
   useEffect(() => {
     if (!scanning) return;
@@ -391,6 +400,10 @@ export function App() {
       : '\nVisit GPS not captured.');
     const payload = {action: 'event', vendorId: vendor.id, kind, note: details, due, amount: 0, idempotencyKey: visitKey.current, gpsLat: gps ? String(gps.lat) : '', gpsLng: gps ? String(gps.lng) : '', gpsAccuracy: gps ? String(Math.round(gps.accuracy)) : ''};
     try {
+      const officialId = getSession()?.id || '';
+      if (!officialId) throw new Error('Sign in before saving this visit.');
+      writeQueue(mergeVisit(readQueue(), officialId, payload.idempotencyKey, {officialId, registerBase: base, payload, state: 'waiting', error: ''}));
+      await flushPrivateStorage();
       const response = await fetch(`${base}/api/register`, {
         method: 'POST',
         headers: authHeaders(true),
@@ -407,7 +420,7 @@ export function App() {
         const nextBody = await next.json();
         if (next.ok) { setEvents(nextBody.events); setDeliveries(Array.isArray(nextBody.deliveries) ? nextBody.deliveries : []); }
       } catch { /* The write succeeded; do not offer a duplicate submission. */ }
-      const officialId = getSession()?.id || '';
+
       if (officialId && payload.idempotencyKey) writeQueue(mergeVisit(readQueue(), officialId, payload.idempotencyKey, null));
       if (correcting.current?.key === payload.idempotencyKey) {
         pushHistory({action: 'corrected', vendorId: vendor.id, kind: kind, detail: 'Corrected visit accepted by the register.'});
@@ -441,7 +454,7 @@ export function App() {
         correcting.current = null;
       } else {
         const officialId = getSession()?.id || '';
-        if (officialId && correcting.current?.key === payload.idempotencyKey) {
+        if (officialId) {
           const message = cause instanceof Error ? cause.message : 'Could not save.';
           const temporary = /temporary|expired|429|50\d/i.test(message);
           writeQueue(mergeVisit(readQueue(), officialId, payload.idempotencyKey, {officialId, registerBase: base, payload, state: temporary ? 'waiting' : 'rejected', error: message}));
@@ -449,6 +462,7 @@ export function App() {
         setError(cause instanceof Error ? cause.message : 'Could not save. Your notes remain here; reconnect and try again.');
       }
     } finally {
+      try {await flushPrivateStorage();} catch {setNotice(''); setError('Phone storage could not be saved. Keep this app open and retry; check the register before resubmitting.');}
       setBusy(false);
     }
   }
@@ -496,6 +510,7 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      if (hasPin()) {setLocked(true); setAuthReady(false); return;}
       await hydrateSession();
       if (cancelled) return;
       setServerDraft(getRegisterBase());
@@ -518,7 +533,7 @@ export function App() {
           }
         } else if (!cancelled) {
           setSession(body.user);
-          saveSession(token, body.user);
+          await saveSession(token, body.user);
         }
       } catch {
         if (!cancelled) {
@@ -544,7 +559,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const onHidden = () => { if (document.visibilityState === 'hidden' && hasPin()) setLocked(true); };
+    const onHidden = () => { if (document.visibilityState === 'hidden' && hasPin()) {setLocked(true); void lockPrivateStorage().catch(() => setPinError('Phone storage could not be saved before locking. Check your saved visits after unlocking.'));} };
     document.addEventListener('visibilitychange', onHidden);
     return () => document.removeEventListener('visibilitychange', onHidden);
   }, []);
@@ -557,7 +572,8 @@ export function App() {
       setLocked(false);
       setPinDraft('');
       setAuthReady(true);
-      setPinReady(true);
+      setSession(getSession());
+      setPinReady(privateStorageReady());
     } else {
       setPinError('That PIN is not correct.');
       setPinDraft('');
@@ -574,9 +590,10 @@ export function App() {
       setPinDraft('');
       setPinConfirm('');
       setPinReady(true);
-      setNotice('Device PIN set. It is asked for every time this app is opened.');
+      setSession(getSession());
+      setNotice('Encrypted phone storage is ready. The PIN is required whenever the app is opened.');
     } catch (cause) {
-      setPinError(cause instanceof Error ? cause.message : 'Choose a PIN of 4 to 8 digits.');
+      setPinError(cause instanceof Error ? cause.message : 'Choose a PIN of 6 to 12 digits.');
     }
   }
 
@@ -601,7 +618,7 @@ export function App() {
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || 'Sign-in failed');
-      saveSession(body.token, body.user);
+      await saveSession(body.token, body.user);
       setSession(body.user);
       setPassword('');
     } catch (cause) {
@@ -621,7 +638,9 @@ export function App() {
     clearSession();
     // Signing out of the register also clears the device PIN: the next officer
     // sets their own, and the previous officer's cached records stay closed.
-    clearPin();
+    await flushPrivateStorage();
+    await lockPrivateStorage();
+    setLocked(true);
     setSession(null);
     setVendor(null);
     setRecordStale('');
@@ -655,11 +674,11 @@ export function App() {
             <span className="field-scan-icon"><ShieldCheck size={34} /></span>
             <p className="eyebrow">DEVICE LOCK</p>
             <h1>Enter your PIN</h1>
-            <p>Cached vendor records and unsent visit evidence stay on this phone. The PIN locks access in this app. Keep the device screen lock enabled; offline records are not encrypted by this PIN.</p>
+            <p>Cached vendor records and unsent visit evidence stay on this phone. Your PIN decrypts the offline records on this phone. Android also protects them with a device-bound key. Keep the device screen lock enabled.</p>
           </div>
           <form className="field-server" onSubmit={unlock}>
             <label htmlFor="field-pin">PIN</label>
-            <input id="field-pin" type="password" inputMode="numeric" autoComplete="off" maxLength={8} value={pinDraft} onChange={event => setPinDraft(event.target.value)} required autoFocus />
+            <input id="field-pin" type="password" inputMode="numeric" autoComplete="off" maxLength={12} value={pinDraft} onChange={event => setPinDraft(event.target.value)} required autoFocus />
             <button type="submit" disabled={pinDraft.length < 4}>Unlock</button>
           </form>
           <button className="secondary field-wide" type="button" onClick={async () => { if (!window.confirm('Erase all saved sign-ins, drafts, queued visits and cached records on this phone? Unsent visits will be lost.')) return; try { await resetPhone(); window.location.reload(); } catch { setPinError('Phone data could not be fully cleared. Try again.'); } }}>Forgot the PIN — clear this phone</button>
@@ -679,14 +698,14 @@ export function App() {
             <span className="field-scan-icon"><ShieldCheck size={34} /></span>
             <p className="eyebrow">PROTECT THIS PHONE</p>
             <h1>Choose a device PIN</h1>
-            <p>This app keeps vendor records and offline visit evidence on the phone. A PIN is asked for every time the app is opened.</p>
+            <p>Choose a PIN to encrypt vendor records, saved sign-in and offline evidence on this phone. You will need it whenever the app is opened. Forgotten PINs cannot recover encrypted records.</p>
           </div>
           <form className="field-server" onSubmit={createPin}>
-            <label htmlFor="new-pin">PIN (4 to 8 digits)</label>
-            <input id="new-pin" type="password" inputMode="numeric" autoComplete="off" maxLength={8} value={pinDraft} onChange={event => setPinDraft(event.target.value)} required />
+            <label htmlFor="new-pin">PIN (6 to 12 digits)</label>
+            <input id="new-pin" type="password" inputMode="numeric" autoComplete="off" maxLength={12} value={pinDraft} onChange={event => setPinDraft(event.target.value)} required />
             <label htmlFor="confirm-pin">Confirm PIN</label>
-            <input id="confirm-pin" type="password" inputMode="numeric" autoComplete="off" maxLength={8} value={pinConfirm} onChange={event => setPinConfirm(event.target.value)} required />
-            <button type="submit" disabled={pinDraft.length < 4}>Set PIN and continue</button>
+            <input id="confirm-pin" type="password" inputMode="numeric" autoComplete="off" maxLength={12} value={pinConfirm} onChange={event => setPinConfirm(event.target.value)} required />
+            <button type="submit" disabled={pinDraft.length < 6}>Set PIN and continue</button>
           </form>
           {pinError && <div className="field-alert" role="alert">{pinError}</div>}
           <p className="field-help">A PIN protects this phone only. It is not your register password and it does not change what you may record.</p>
@@ -732,7 +751,7 @@ export function App() {
               const response = await fetch(`${getRegisterBase()}/api/auth`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify({action: 'change-password', currentPassword: current, password: next})});
               const body = await response.json();
               if (!response.ok) throw new Error(body.error || 'Could not change the password');
-              saveSession(getToken(), body.user);
+              await saveSession(getToken(), body.user);
               setSession(body.user);
               setNotice('Password updated.');
             } catch (cause) {

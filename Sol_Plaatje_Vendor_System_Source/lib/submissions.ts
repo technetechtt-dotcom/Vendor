@@ -2,7 +2,7 @@ const keyPattern = /^[A-Za-z0-9_-]{8,80}$/;
 
 type Sql = {
   prepare: (query: string) => {
-    bind: (...args: unknown[]) => {first: <T = any>() => Promise<T | null>};
+    bind: (...args: unknown[]) => {first: <T = Record<string, unknown>>() => Promise<T | null>};
   };
 };
 

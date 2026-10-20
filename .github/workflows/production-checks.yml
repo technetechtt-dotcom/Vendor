@@ -1,0 +1,70 @@
+name: Production checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  office:
+    name: Office, security and live Workers acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: Sol_Plaatje_Vendor_System_Source
+    env:
+      SITES_LOCAL_PERSIST_PATH: /tmp/vendor-ci-state
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            Sol_Plaatje_Vendor_System_Source/package-lock.json
+            Field_Officer_App/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm ci --prefix ../Field_Officer_App --no-audit --no-fund
+      - run: npm run lint -- --max-warnings=0
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run local:setup
+      - name: Exercise live authentication and operational workflows
+        run: |
+          npm run dev -- --port 5173 > /tmp/vendor-preview.log 2>&1 &
+          node tests/http-smoke.mjs
+      - name: Preserve preview diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: office-runtime-log
+          path: /tmp/vendor-preview.log
+          if-no-files-found: ignore
+  android:
+    name: Field web and Android compilation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: Field_Officer_App
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: Field_Officer_App/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: field-debug-apk
+          path: Field_Officer_App/releases/*-debug.apk

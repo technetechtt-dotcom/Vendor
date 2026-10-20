@@ -1,5 +1,5 @@
 import {bucket, database} from '../../../lib/server';
-import {ensureAccounts, passwordPending, sessionUser} from '../../../lib/accounts';
+import {passwordPending, sessionUser} from '../../../lib/accounts';
 import {fieldCorsHeaders, withFieldCors} from '../../../lib/cors';
 
 const types = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
@@ -10,7 +10,6 @@ function denied(status: number, error: string) {
 
 async function officeUser(req: Request) {
   const db = database();
-  await ensureAccounts(db);
   const account = await sessionUser(db, req);
   if (!account) return denied(401, 'Sign in required.');
   if (passwordPending(account)) return denied(403, 'Change your password before continuing.');

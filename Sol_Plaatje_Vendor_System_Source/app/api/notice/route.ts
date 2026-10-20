@@ -1,5 +1,5 @@
 import {database, noticeWebhook} from '../../../lib/server';
-import {ensureAccounts, passwordPending, sessionUser} from '../../../lib/accounts';
+import {passwordPending, sessionUser} from '../../../lib/accounts';
 import {fieldCorsHeaders, withFieldCors, mutationOriginError} from '../../../lib/cors';
 import {noticePdf, noticeText, noticeVendor} from '../../../lib/notices';
 import {submissionKey} from '../../../lib/submissions';
@@ -14,7 +14,6 @@ function json(body: unknown, status = 200) {
 
 async function viewer(req: Request) {
   const db = database();
-  await ensureAccounts(db);
   const account = await sessionUser(db, req);
   if (!account) return json({error: 'Sign in required.'}, 401);
   if (passwordPending(account)) return json({error: 'Change your password before continuing.'}, 403);
@@ -22,7 +21,7 @@ async function viewer(req: Request) {
 }
 
 async function noticeCase(db: ReturnType<typeof database>, eventId: string) {
-  const event = await db.prepare('SELECT id,vendor_id,kind,amount,note,due,created_at,actor,resolved,snapshot FROM events WHERE id=?').bind(eventId).first<any>();
+  const event = await db.prepare('SELECT id,vendor_id,kind,amount,note,due,created_at,actor,resolved,snapshot FROM events WHERE id=?').bind(eventId).first<{id: string; vendor_id: string; kind: string; amount: number; note: string; due: string; created_at: string; actor: string; resolved: number; snapshot: string}>();
   if (!event || !['Warning', 'Violation'].includes(event.kind)) return null;
   const row = await db.prepare('SELECT payload FROM vendors WHERE id=?').bind(event.vendor_id).first<{payload: string}>();
   if (!row) return null;
@@ -75,7 +74,7 @@ async function handlePost(req: Request) {
   const account = await viewer(req);
   if (account instanceof Response) return account;
   if (!can(account.role, 'compliance.write')) return json({error: 'Your role cannot change notice delivery or compliance cases.'}, 403);
-  const body: any = await req.json();
+  const body: Record<string, unknown> = await req.json();
   const eventId = String(body.eventId || '');
   const found = await noticeCase(database(), eventId);
   if (!found) return json({error: 'Notice not found.'}, 404);

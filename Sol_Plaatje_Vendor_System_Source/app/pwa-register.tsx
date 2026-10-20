@@ -1,11 +1,12 @@
 'use client';
 import {useEffect,useState} from 'react';
 
+type InstallEvent=Event & {prompt:()=>Promise<void>;userChoice:Promise<{outcome:string}>};
 export function PwaRegister(){
-  const [install,setInstall]=useState<any>(null);
+  const [install,setInstall]=useState<InstallEvent|null>(null);
   useEffect(()=>{
     if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
-    const offer=(e:Event)=>{e.preventDefault();setInstall(e)};
+    const offer=(e:Event)=>{e.preventDefault();if('prompt' in e)setInstall(e as InstallEvent)};
     window.addEventListener('beforeinstallprompt',offer);
     return()=>window.removeEventListener('beforeinstallprompt',offer);
   },[]);

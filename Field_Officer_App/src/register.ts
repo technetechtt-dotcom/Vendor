@@ -1,3 +1,4 @@
+import {createPrivateVault, unlockPrivateVault, privateStorage, privateStorageReady, hasPrivateVault, flushPrivateStorage, erasePrivateStorage} from './secure-storage';
 export type Vendor = {
   id: string; name: string; business: string; type: 'Formal' | 'Informal'; sector: string;
   hub: string; unit: string; address: string; lat: string; lng: string; phone: string;
@@ -19,7 +20,7 @@ const PIN_ATTEMPTS_KEY = 'solplaatje.field.pinAttempts';
 
 /** Cached vendor records and offline evidence stay behind a device PIN. */
 export function hasPin() {
-  return Boolean(localStorage.getItem(PIN_KEY));
+  return hasPrivateVault() || Boolean(localStorage.getItem(PIN_KEY));
 }
 
 export function clearPin() {
@@ -28,8 +29,11 @@ export function clearPin() {
 }
 
 export async function resetPhone() {
-  for (const key of ['solplaatje.field.visitDrafts', 'solplaatje.field.visitQueue', 'solplaatje.field.vendorCache', 'solplaatje.field.visitHistory']) localStorage.removeItem(key);
-  await clearSession();
+  await erasePrivateStorage();
+  memoryToken = ''; memoryUser = null;
+  const preferences = await nativePreferences();
+  if (preferences) {await preferences.remove({key: TOKEN_KEY}); await preferences.remove({key: USER_KEY});}
+  sessionStorage.removeItem(TOKEN_KEY); sessionStorage.removeItem(USER_KEY);
   clearPin();
 }
 
@@ -46,30 +50,32 @@ async function pinHash(pin: string, salt: string) {
 }
 
 export async function setPin(pin: string) {
-  const value = pin.trim();
-  if (!/^\d{4,8}$/.test(value)) throw new Error('Choose a PIN of 4 to 8 digits.');
-  const salt = crypto.randomUUID();
-  localStorage.setItem(PIN_KEY, JSON.stringify({salt, hash: await pinHash(value, salt)}));
+  await hydrateSession();
+  await createPrivateVault(pin.trim());
+  await writeProtected(memoryToken, memoryUser);
+  localStorage.setItem(PIN_KEY, JSON.stringify({version: 2}));
 }
 
 export async function verifyPin(pin: string) {
   let attempts: {failures: number; blockedUntil: number} = {failures: 0, blockedUntil: 0};
-  try { attempts = JSON.parse(localStorage.getItem(PIN_ATTEMPTS_KEY) || 'null') || attempts; } catch { /* use initial count */ }
+  try {attempts = JSON.parse(localStorage.getItem(PIN_ATTEMPTS_KEY) || 'null') || attempts;} catch { /* use initial count */ }
   if (attempts.blockedUntil > Date.now()) throw new Error(`Too many PIN attempts. Try again in ${Math.ceil((attempts.blockedUntil - Date.now()) / 1000)} seconds.`);
-  const raw = localStorage.getItem(PIN_KEY);
-  if (!raw) return false;
-  try {
-    const {salt, hash} = JSON.parse(raw) as {salt: string; hash: string};
-    const valid = (await pinHash(pin.trim(), salt)) === hash;
-    if (valid) localStorage.removeItem(PIN_ATTEMPTS_KEY);
-    else {
-      const failures = attempts.failures + 1;
-      localStorage.setItem(PIN_ATTEMPTS_KEY, JSON.stringify({failures, blockedUntil: failures >= 5 ? Date.now() + 60_000 : 0}));
-    }
-    return valid;
-  } catch {
-    return false;
+  let valid = false;
+  if (hasPrivateVault()) valid = await unlockPrivateVault(pin.trim());
+  else {
+    const raw = localStorage.getItem(PIN_KEY);
+    if (!raw) return false;
+    try {
+      const old = JSON.parse(raw) as {salt: string; hash: string};
+      valid = Boolean(old.salt && old.hash && await pinHash(pin.trim(), old.salt) === old.hash);
+    } catch {valid = false;}
   }
+  if (valid) localStorage.removeItem(PIN_ATTEMPTS_KEY);
+  else {
+    const failures = attempts.failures + 1;
+    localStorage.setItem(PIN_ATTEMPTS_KEY, JSON.stringify({failures, blockedUntil: failures >= 5 ? Date.now() + 60_000 : 0}));
+  }
+  return valid;
 }
 
 export type FieldAccount = {id: string; name: string; email: string; role: string; mustChangePassword?: boolean};
@@ -154,37 +160,26 @@ async function nativePreferences() {
 }
 
 async function writeProtected(token: string, user: FieldAccount | null) {
+  if (!privateStorageReady()) throw new Error('Unlock or create the encrypted phone vault before signing in.');
+  if (token) privateStorage.setItem(TOKEN_KEY, token); else privateStorage.removeItem(TOKEN_KEY);
+  if (user) privateStorage.setItem(USER_KEY, JSON.stringify(user)); else privateStorage.removeItem(USER_KEY);
+  await flushPrivateStorage();
+  // Remove legacy plaintext credentials only after the encrypted commit succeeds.
   const preferences = await nativePreferences();
-  if (preferences) {
-    if (token) await preferences.set({key: TOKEN_KEY, value: token});
-    else await preferences.remove({key: TOKEN_KEY});
-    if (user) await preferences.set({key: USER_KEY, value: JSON.stringify(user)});
-    else await preferences.remove({key: USER_KEY});
-    return;
-  }
-  if (token) sessionStorage.setItem(TOKEN_KEY, token);
-  else sessionStorage.removeItem(TOKEN_KEY);
-  if (user) sessionStorage.setItem(USER_KEY, JSON.stringify(user));
-  else sessionStorage.removeItem(USER_KEY);
+  if (preferences) {await preferences.remove({key: TOKEN_KEY}); await preferences.remove({key: USER_KEY});}
+  localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(USER_KEY);
+  sessionStorage.removeItem(TOKEN_KEY); sessionStorage.removeItem(USER_KEY);
 }
 
 export async function hydrateSession() {
-  const legacyToken = localStorage.getItem(TOKEN_KEY) || '';
-  const legacyUser = localStorage.getItem(USER_KEY) || '';
-  localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(USER_KEY);
+  if (hasPrivateVault() && !privateStorageReady()) return;
   const preferences = await nativePreferences();
-  if (preferences) {
-    memoryToken = legacyToken || (await preferences.get({key: TOKEN_KEY})).value || '';
-    const raw = legacyUser || (await preferences.get({key: USER_KEY})).value || '';
-    memoryUser = raw ? JSON.parse(raw) : null;
-    if (legacyToken) await writeProtected(memoryToken, memoryUser);
-    return;
-  }
-  memoryToken = legacyToken || sessionStorage.getItem(TOKEN_KEY) || '';
-  const raw = legacyUser || sessionStorage.getItem(USER_KEY) || '';
-  memoryUser = raw ? JSON.parse(raw) : null;
-  if (legacyToken || legacyUser) await writeProtected(memoryToken, memoryUser);
+  const oldToken = localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || (preferences ? (await preferences.get({key: TOKEN_KEY})).value : '') || '';
+  const oldUser = localStorage.getItem(USER_KEY) || sessionStorage.getItem(USER_KEY) || (preferences ? (await preferences.get({key: USER_KEY})).value : '') || '';
+  memoryToken = privateStorage.getItem(TOKEN_KEY) || oldToken;
+  const raw = privateStorage.getItem(USER_KEY) || oldUser;
+  memoryUser = raw ? JSON.parse(raw) as FieldAccount : null;
+  if (privateStorageReady() && (oldToken || oldUser)) await writeProtected(memoryToken, memoryUser);
 }
 
 export function getToken() {
@@ -198,13 +193,13 @@ export function getSession(): FieldAccount | null {
 export function saveSession(token: string, user: FieldAccount) {
   memoryToken = token;
   memoryUser = user;
-  void writeProtected(token, user);
+  return writeProtected(token, user);
 }
 
 export function clearSession() {
   memoryToken = '';
   memoryUser = null;
-  return writeProtected('', null);
+  return privateStorageReady() ? writeProtected('', null) : Promise.resolve();
 }
 
 export function authHeaders(json = false): HeadersInit {

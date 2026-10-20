@@ -121,7 +121,8 @@ export function monthReport(entries: Entry[], months: number, end = today()): Mo
 export type CategoryRow = {category: string; charges: number; payments: number};
 
 /** Charges and payments grouped by the approved fee category they used. */
-export function categoryReport(entries: Entry[], _tariffs: {id: string; category: string}[] = [], period: Period): CategoryRow[] {
+export function categoryReport(entries: Entry[], tariffs: {id: string; category: string}[] = [], period: Period): CategoryRow[] {
+  void tariffs; // Classification uses historical entry references, not today's fee schedule.
   const groups = new Map<string, CategoryRow>();
   const row = (category: string) => {
     let existing = groups.get(category);

@@ -1,6 +1,7 @@
+import {readJsonObject} from '../../../lib/request';
 import {mutationOriginError} from '../../../lib/cors';
 import {database} from '../../../lib/server';
-import {ensureAccounts, passwordPending, sessionUser} from '../../../lib/accounts';
+import {passwordPending, sessionUser} from '../../../lib/accounts';
 import {can} from '../../../lib/capabilities';
 import {noticePdf} from '../../../lib/notices';
 import {Vendor} from '../../../lib/data';
@@ -21,7 +22,6 @@ function stamp() {
 export async function GET(req: Request) {
   try {
     const db = database();
-    await ensureAccounts(db);
     const account = await sessionUser(db, req);
     if (!account) return json({error: 'Sign in required.'}, 401);
     if (passwordPending(account)) return json({error: 'Change your password before continuing.'}, 403);
@@ -34,7 +34,7 @@ export async function GET(req: Request) {
     if (!row) return json({error: 'Vendor not found.'}, 404);
     const vendor = JSON.parse(row.payload) as Vendor;
 
-    const permits = await db.prepare("SELECT card_serial AS cardSerial,status,created_at AS createdAt FROM permits WHERE vendor_id=? ORDER BY created_at").bind(vendor.id).all<any>();
+    const permits = await db.prepare("SELECT card_serial AS cardSerial,status,created_at AS createdAt FROM permits WHERE vendor_id=? ORDER BY created_at").bind(vendor.id).all<{cardSerial: string; status: string; createdAt: string}>();
     let currentSerial = '';
     let cardState = 'No card serial is on record.';
     for (const permit of permits.results) {
@@ -107,12 +107,11 @@ export async function POST(req: Request) {
   if (rejected) return rejected;
   try {
     const db = database();
-    await ensureAccounts(db);
     const account = await sessionUser(db, req);
     if (!account) return json({error: 'Sign in required.'}, 401);
     if (passwordPending(account)) return json({error: 'Change your password before continuing.'}, 403);
     if (!can(account.role, 'permits.write')) return json({error: 'Your role cannot record card events.'}, 403);
-    const body: any = await req.json().catch(() => null);
+    const body = await readJsonObject(req);
     if (!body || body.action !== 'card-event') return json({error: 'Unknown action.'}, 400);
     const vendorId = String(body.vendorId || '');
     const kind = String(body.kind || '');

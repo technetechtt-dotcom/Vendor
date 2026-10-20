@@ -65,8 +65,7 @@ export type Snapshot = {
 
 function redact(table: string, row: Record<string, unknown>) {
   if (table === 'users') {
-    const {password_hash: _passwordHash, ...rest} = row;
-    return {...rest, password_hash: 'not exported'};
+    return {...row, password_hash: 'not exported'};
   }
   return row;
 }

@@ -1,6 +1,6 @@
 import {database} from '../../../lib/server';
 import {FIELD_APP_FILE, FIELD_APP_VERSION} from '../../../lib/field-app';
-import {ensureAccounts, passwordPending, sessionUser} from '../../../lib/accounts';
+import {passwordPending, sessionUser} from '../../../lib/accounts';
 import {can} from '../../../lib/capabilities';
 import {mutationOriginError} from '../../../lib/cors';
 
@@ -30,7 +30,6 @@ export async function POST(req: Request) {
   if (rejected) return rejected;
   try {
     const db = database();
-    await ensureAccounts(db);
     const account = await sessionUser(db, req);
     if (!account) return json({error: 'Sign in required.'}, 401);
     if (passwordPending(account)) return json({error: 'Change your password before continuing.'}, 403);

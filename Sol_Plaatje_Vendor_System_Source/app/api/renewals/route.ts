@@ -1,6 +1,7 @@
+import {readJsonObject} from '../../../lib/request';
 import {mutationOriginError} from '../../../lib/cors';
 import {database} from '../../../lib/server';
-import {ensureAccounts, passwordPending, sessionUser} from '../../../lib/accounts';
+import {passwordPending, sessionUser} from '../../../lib/accounts';
 import {can} from '../../../lib/capabilities';
 import {noticeWebhook} from '../../../lib/server';
 import {writeAudit} from '../../../lib/workflows';
@@ -21,7 +22,7 @@ const WINDOW_DAYS = 60;
 
 async function scan(db: ReturnType<typeof database>, actor: string, actorId: string, stamp: string) {
   const today = stamp.slice(0, 10);
-  const rows = await db.prepare('SELECT id,payload FROM vendors').all<any>();
+  const rows = await db.prepare('SELECT id,payload FROM vendors').all<{id: string; payload: string}>();
   const reminders: {vendorId: string; business: string; expires: string; daysLeft: number; status: string; recorded: boolean}[] = [];
   for (const row of rows.results) {
     const vendor = JSON.parse(row.payload) as Vendor;
@@ -29,7 +30,7 @@ async function scan(db: ReturnType<typeof database>, actor: string, actorId: str
     const left = daysUntil(vendor.expires, today);
     if (!Number.isFinite(left) || left > WINDOW_DAYS) continue;
     const status = left < 0 ? 'expired' : vendor.status === 'Suspended' ? 'suspended' : vendor.status === 'Approved' ? 'due' : 'pending-review';
-    const existing = await db.prepare('SELECT id FROM renewal_reminders WHERE vendor_id=? AND expires=?').bind(vendor.id, vendor.expires).first<any>();
+    const existing = await db.prepare('SELECT id FROM renewal_reminders WHERE vendor_id=? AND expires=?').bind(vendor.id, vendor.expires).first<{id: string}>();
     reminders.push({vendorId: vendor.id, business: vendor.business, expires: vendor.expires, daysLeft: left, status, recorded: Boolean(existing)});
   }
   reminders.sort((a, b) => a.daysLeft - b.daysLeft);
@@ -46,12 +47,11 @@ export async function POST(req: Request) {
   if (rejected) return rejected;
   try {
     const db = database();
-    await ensureAccounts(db);
     const account = await sessionUser(db, req);
     if (!account) return json({error: 'Sign in required.'}, 401);
     if (passwordPending(account)) return json({error: 'Change your password before continuing.'}, 403);
     if (!can(account.role, 'permits.write')) return json({error: 'Your role cannot run the renewal scan.'}, 403);
-    const body: any = await req.json().catch(() => ({}));
+    const body = await readJsonObject(req);
     const scanOnly = body?.action === 'preview';
     const at = new Date().toISOString();
     const result = await scan(db, account.name, account.id, at);

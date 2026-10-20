@@ -1,16 +1,8 @@
-import {calendarDate} from './data';
+import {calendarDate, Vendor} from './data';
+import {z} from 'zod';
 
-interface SqlStatement {
-  bind(...args: unknown[]): SqlStatement;
-  first<T = any>(): Promise<T | null>;
-  all<T = any>(): Promise<{results: T[]}>;
-  run(): Promise<unknown>;
-}
-
-interface Sql {
-  prepare(query: string): SqlStatement;
-  batch(statements: SqlStatement[]): Promise<unknown>;
-}
+type SqlStatement = D1PreparedStatement;
+type Sql = Pick<D1Database, 'prepare' | 'batch'>;
 
 const eventSelect = `id,vendor_id AS vendorId,kind,amount,note,due,created_at AS createdAt,actor,resolved,gps_lat AS gpsLat,gps_lng AS gpsLng,gps_accuracy AS gpsAccuracy,owner,severity,case_status AS caseStatus,checklist,evidence,follow_up_of AS followUpOf,snapshot,receipt_no AS receiptNo,pay_method AS payMethod,pay_ref AS payRef,cashier,reconciled,reversal_of AS reversalOf,reconciliation_ref AS reconciliationRef`;
 
@@ -35,10 +27,10 @@ export async function writeAudit(db: Sql, entity: string, entityId: string, acti
   await sealAuditTail(db);
 }
 
-const auditMaterial = (previous: string, row: any) =>
+const auditMaterial = (previous: string, row: {seq: number; id: string; entity: string; entityId: string; action: string; beforeJson: string; afterJson: string; actor: string; actorId: string; createdAt: string}) =>
   [previous, row.seq, row.id, row.entity, row.entityId, row.action, row.beforeJson, row.afterJson, row.actor, row.actorId || '', row.createdAt].join('\u0001');
 
-async function digest(previous: string, row: any) {
+async function digest(previous: string, row: {seq: number; id: string; entity: string; entityId: string; action: string; beforeJson: string; afterJson: string; actor: string; actorId: string; createdAt: string}) {
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(auditMaterial(previous, row)));
   return [...new Uint8Array(bytes)].map(byte => byte.toString(16).padStart(2, '0')).join('');
 }
@@ -51,7 +43,7 @@ async function digest(previous: string, row: any) {
  */
 export async function sealAuditTail(db: Sql) {
   try {
-    const rows = await db.prepare('SELECT id,seq,entity,entity_id AS entityId,action,before_json AS beforeJson,after_json AS afterJson,actor,actor_id AS actorId,created_at AS createdAt FROM audit_log ORDER BY seq').all<any>();
+    const rows = await db.prepare('SELECT id,seq,entity,entity_id AS entityId,action,before_json AS beforeJson,after_json AS afterJson,actor,actor_id AS actorId,created_at AS createdAt FROM audit_log ORDER BY seq').all<{id: string; seq: number; entity: string; entityId: string; action: string; beforeJson: string; afterJson: string; actor: string; actorId: string; createdAt: string}>();
     let hash = '';
     let lastSeq = 0;
     for (const row of rows.results) {
@@ -67,7 +59,7 @@ export async function sealAuditTail(db: Sql) {
 
 /** Recompute the chain and report whether any audit row was altered or removed. */
 export async function checkAuditIntegrity(db: Sql) {
-  const rows = await db.prepare('SELECT id,seq,entity,entity_id AS entityId,action,before_json AS beforeJson,after_json AS afterJson,actor,actor_id AS actorId,created_at AS createdAt FROM audit_log ORDER BY seq').all<any>();
+  const rows = await db.prepare('SELECT id,seq,entity,entity_id AS entityId,action,before_json AS beforeJson,after_json AS afterJson,actor,actor_id AS actorId,created_at AS createdAt FROM audit_log ORDER BY seq').all<{id: string; seq: number; entity: string; entityId: string; action: string; beforeJson: string; afterJson: string; actor: string; actorId: string; createdAt: string}>();
   const chain = await db.prepare('SELECT last_hash AS lastHash,last_seq AS lastSeq,rows_sealed AS rowsSealed,updated_at AS updatedAt FROM audit_chain WHERE id=1').first<{lastHash: string; lastSeq: number; rowsSealed: number; updatedAt: string}>();
   let hash = '';
   let lastSeq = 0;
@@ -89,18 +81,18 @@ export async function checkAuditIntegrity(db: Sql) {
 
 export async function officeBundle(db: Sql) {
   const [units, pitches, tariffs, permits, requirements, history, imports, audit, permitDocuments, renewals, settings, integrityIssues] = await Promise.all([
-    db.prepare('SELECT u.id,u.hub_id AS hubId,h.name AS hub,u.unit_code AS unitCode,u.capacity,u.status,u.notes FROM hub_units u LEFT JOIN hubs h ON h.id=u.hub_id ORDER BY h.name,u.unit_code').all<any>(),
-    db.prepare('SELECT id,vendor_id AS vendorId,pitch_code AS pitchCode,ward,area,activity,lat,lng,accuracy,verified_at AS verifiedAt FROM pitches ORDER BY area,pitch_code').all<any>(),
-    db.prepare('SELECT id,category,amount_cents AS amountCents,effective_from AS effectiveFrom,effective_to AS effectiveTo,applicability,approval_ref AS approvalRef,created_at AS createdAt FROM fee_schedules ORDER BY effective_from DESC').all<any>(),
-    db.prepare('SELECT id,vendor_id AS vendorId,permit_number AS permitNumber,card_serial AS cardSerial,status,note,actor,created_at AS createdAt FROM permits ORDER BY created_at DESC').all<any>(),
-    db.prepare('SELECT id,rule_ref AS ruleRef,category,document_label AS documentLabel,validity_months AS validityMonths FROM requirements ORDER BY category,document_label').all<any>(),
-    db.prepare('SELECT id,hub_id AS hubId,unit_code AS unitCode,vendor_id AS vendorId,action,actor,created_at AS createdAt,note FROM allocation_history ORDER BY created_at DESC LIMIT 200').all<any>(),
-    db.prepare('SELECT id,batch_id AS batchId,payload,status,note,created_at AS createdAt FROM import_rows ORDER BY created_at DESC LIMIT 200').all<any>(),
-    db.prepare('SELECT id,entity,entity_id AS entityId,action,before_json AS beforeJson,after_json AS afterJson,actor,actor_id AS actorId,created_at AS createdAt FROM audit_log ORDER BY created_at DESC LIMIT 200').all<any>(),
-    db.prepare('SELECT id,vendor_id AS vendorId,kind,card_serial AS cardSerial,permit_expires AS permitExpires,note,actor,created_at AS createdAt FROM permit_documents ORDER BY created_at DESC LIMIT 200').all<any>(),
-    db.prepare('SELECT id,vendor_id AS vendorId,expires,days_left AS daysLeft,status,note,actor,created_at AS createdAt FROM renewal_reminders ORDER BY expires LIMIT 200').all<any>(),
+    db.prepare('SELECT u.id,u.hub_id AS hubId,h.name AS hub,u.unit_code AS unitCode,u.capacity,u.status,u.notes FROM hub_units u LEFT JOIN hubs h ON h.id=u.hub_id ORDER BY h.name,u.unit_code').all<{id: string; hubId: string; hub: string; unitCode: string; capacity: number; status: string; notes: string}>(),
+    db.prepare('SELECT id,vendor_id AS vendorId,pitch_code AS pitchCode,ward,area,activity,lat,lng,accuracy,verified_at AS verifiedAt FROM pitches ORDER BY area,pitch_code').all<{id: string; vendorId: string; pitchCode: string; ward: string; area: string; activity: string; lat: string; lng: string; accuracy: string; verifiedAt: string}>(),
+    db.prepare('SELECT id,category,amount_cents AS amountCents,effective_from AS effectiveFrom,effective_to AS effectiveTo,applicability,approval_ref AS approvalRef,created_at AS createdAt FROM fee_schedules ORDER BY effective_from DESC').all<{id: string; category: string; amountCents: number; effectiveFrom: string; effectiveTo: string; applicability: string; approvalRef: string; createdAt: string}>(),
+    db.prepare('SELECT id,vendor_id AS vendorId,permit_number AS permitNumber,card_serial AS cardSerial,status,note,actor,created_at AS createdAt FROM permits ORDER BY created_at DESC').all<{id: string; vendorId: string; permitNumber: string; cardSerial: string; status: string; note: string; actor: string; createdAt: string}>(),
+    db.prepare('SELECT id,rule_ref AS ruleRef,category,document_label AS documentLabel,validity_months AS validityMonths FROM requirements ORDER BY category,document_label').all<{id: string; ruleRef: string; category: string; documentLabel: string; validityMonths: number}>(),
+    db.prepare('SELECT id,hub_id AS hubId,unit_code AS unitCode,vendor_id AS vendorId,action,actor,created_at AS createdAt,note FROM allocation_history ORDER BY created_at DESC LIMIT 200').all<{id: string; hubId: string; unitCode: string; vendorId: string; action: string; actor: string; createdAt: string; note: string}>(),
+    db.prepare('SELECT id,batch_id AS batchId,payload,status,note,created_at AS createdAt FROM import_rows ORDER BY created_at DESC LIMIT 200').all<{id: string; batchId: string; payload: string; status: string; note: string; createdAt: string}>(),
+    db.prepare('SELECT id,entity,entity_id AS entityId,action,before_json AS beforeJson,after_json AS afterJson,actor,actor_id AS actorId,created_at AS createdAt FROM audit_log ORDER BY created_at DESC LIMIT 200').all<{id: string; entity: string; entityId: string; action: string; beforeJson: string; afterJson: string; actor: string; actorId: string; createdAt: string}>(),
+    db.prepare('SELECT id,vendor_id AS vendorId,kind,card_serial AS cardSerial,permit_expires AS permitExpires,note,actor,created_at AS createdAt FROM permit_documents ORDER BY created_at DESC LIMIT 200').all<{id: string; vendorId: string; kind: string; cardSerial: string; permitExpires: string; note: string; actor: string; createdAt: string}>(),
+    db.prepare('SELECT id,vendor_id AS vendorId,expires,days_left AS daysLeft,status,note,actor,created_at AS createdAt FROM renewal_reminders ORDER BY expires LIMIT 200').all<{id: string; vendorId: string; expires: string; daysLeft: number; status: string; note: string; actor: string; createdAt: string}>(),
     db.prepare("SELECT value FROM app_meta WHERE key='operations'").first<{value: string}>(),
-    db.prepare("SELECT id,entity,entity_id AS entityId,parent_id AS parentId,issue,payload,detected_at AS detectedAt,resolved_at AS resolvedAt FROM integrity_issues WHERE resolved_at='' ORDER BY detected_at DESC").all<any>(),
+    db.prepare("SELECT id,entity,entity_id AS entityId,parent_id AS parentId,issue,payload,detected_at AS detectedAt,resolved_at AS resolvedAt FROM integrity_issues WHERE resolved_at='' ORDER BY detected_at DESC").all<{id: string; entity: string; entityId: string; parentId: string; issue: string; payload: string; detectedAt: string; resolvedAt: string}>(),
   ]);
   let auditIntegrity = await checkAuditIntegrity(db);
   if (!auditIntegrity.sealed) {
@@ -153,23 +145,30 @@ export function parseCsv(csv: string) {
   return rows;
 }
 
-export function validateVendorShape(v: any) {
-  if (!v || typeof v.name !== 'string' || !v.name.trim() || typeof v.business !== 'string' || !v.business.trim() || !['Formal', 'Informal'].includes(v.type) || !['Approved', 'Pending review', 'Suspended'].includes(v.status)) throw new Error('Please complete the vendor name, business and registration details.');
-  for (const key of ['name', 'business', 'sector', 'hub', 'unit', 'address', 'lat', 'lng', 'phone', 'email', 'issued', 'expires', 'status', 'photo']) if (typeof v[key] !== 'string' || v[key].length > 500) throw new Error('One or more fields are invalid.');
-  if (!calendarDate(v.issued) || !calendarDate(v.expires) || v.expires < v.issued) throw new Error('Enter real permit dates; expiry must follow the issue date.');
-  if (v.type === 'Informal' && (!String(v.lat).trim() || !String(v.lng).trim() || !Number.isFinite(Number(v.lat)) || !Number.isFinite(Number(v.lng)) || Math.abs(Number(v.lat)) > 90 || Math.abs(Number(v.lng)) > 180)) throw new Error('Enter valid GPS coordinates for the informal trader.');
-  if (v.type === 'Formal' && (!String(v.hub).trim() || !String(v.unit).trim())) throw new Error('Select a hub and enter the allocated unit.');
-  if (!Array.isArray(v.documents) || v.documents.some((item: unknown) => typeof item !== 'string' || item.length > 80)) throw new Error('Invalid document checklist.');
-  if (!Array.isArray(v.files)) v.files = [];
-  if (v.files.length > 12 || v.files.some((file: any) => !file || typeof file.id !== 'string' || typeof file.label !== 'string' || typeof file.name !== 'string' || typeof file.url !== 'string' || file.label.length > 80 || file.name.length > 180 || file.url !== '/api/document?key=' + file.id || !/^[a-f0-9-]{36}$/.test(file.id))) throw new Error('One or more verification documents are invalid.');
+const vendorSchema = z.object({
+  id: z.string().max(80), name: z.string().trim().min(1).max(500), business: z.string().trim().min(1).max(500),
+  type: z.enum(['Formal', 'Informal']), status: z.enum(['Approved', 'Pending review', 'Suspended']),
+  sector: z.string().max(500), hub: z.string().max(500), unit: z.string().max(500), address: z.string().max(500),
+  lat: z.string().max(500), lng: z.string().max(500), phone: z.string().max(500), email: z.string().max(500),
+  issued: z.string().refine(calendarDate), expires: z.string().refine(calendarDate), photo: z.string().max(500),
+  documents: z.array(z.string().max(80)), sample: z.boolean().optional(),
+  files: z.array(z.object({id: z.string().uuid(), label: z.string().max(80), name: z.string().max(180), url: z.string(), contentType: z.string().max(100)}).refine(file => file.url === '/api/document?key=' + file.id)).max(12).optional(),
+});
+export function validateVendorShape(input: unknown): asserts input is Vendor {
+  const result = vendorSchema.safeParse(input);
+  if (!result.success) throw new Error('Invalid registration: ' + result.error.issues.map(issue => issue.path.join('.') + ' ' + issue.message).slice(0, 3).join('; '));
+  const v = result.data;
+  if (v.expires < v.issued) throw new Error('Expiry must follow the issue date.');
+  if (v.type === 'Informal' && (!v.lat.trim() || !v.lng.trim() || !Number.isFinite(Number(v.lat)) || !Number.isFinite(Number(v.lng)) || Math.abs(Number(v.lat)) > 90 || Math.abs(Number(v.lng)) > 180)) throw new Error('Enter valid GPS coordinates for the informal trader.');
+  if (v.type === 'Formal' && (!v.hub.trim() || !v.unit.trim())) throw new Error('Select a hub and enter the allocated unit.');
 }
 
 function claimExists(gate?: {id: string; note: string}) {
   return gate ? "EXISTS (SELECT 1 FROM import_rows WHERE id=? AND status='approved' AND note=?)" : '';
 }
 
-export async function allocationPlan(db: Sql, vendor: any, hubId: string, actor: string, stamp: string, gate?: {id: string; note: string}) {
-  const previous = await db.prepare('SELECT hub,unit,hub_id AS hubId FROM allocations WHERE vendor_id=?').bind(vendor.id).first<any>();
+export async function allocationPlan(db: Sql, vendor: Vendor, hubId: string, actor: string, stamp: string, gate?: {id: string; note: string}) {
+  const previous = await db.prepare('SELECT hub,unit,hub_id AS hubId FROM allocations WHERE vendor_id=?').bind(vendor.id).first<{hub: string; unit: string; hubId: string}>();
   const claim = claimExists(gate);
   const claimArgs = gate ? [gate.id, gate.note] : [];
   const available = `NOT EXISTS (SELECT 1 FROM hub_units WHERE hub_id=? AND unit_code=? AND status IN ('reserved','unavailable'))`;
@@ -197,7 +196,7 @@ export async function allocationPlan(db: Sql, vendor: any, hubId: string, actor:
 }
 
 export async function renameHub(db: Sql, id: string, name: string, previousName: string, actor: string, stamp: string, actorId = '') {
-  const rows = await db.prepare('SELECT id,payload FROM vendors').all<any>();
+  const rows = await db.prepare('SELECT id,payload FROM vendors').all<{id: string; payload: string}>();
   const updates: SqlStatement[] = [];
   for (const row of rows.results) {
     const vendor = JSON.parse(row.payload);
@@ -217,7 +216,7 @@ export async function renameHub(db: Sql, id: string, name: string, previousName:
 export async function auditPage(db: Sql, offset: number) {
   const start = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
   const size = 200;
-  const rows = await db.prepare('SELECT id,entity,entity_id AS entityId,action,before_json AS beforeJson,after_json AS afterJson,actor,actor_id AS actorId,created_at AS createdAt FROM audit_log ORDER BY created_at DESC LIMIT ' + size + ' OFFSET ?').bind(start).all<any>();
+  const rows = await db.prepare('SELECT id,entity,entity_id AS entityId,action,before_json AS beforeJson,after_json AS afterJson,actor,actor_id AS actorId,created_at AS createdAt FROM audit_log ORDER BY created_at DESC LIMIT ' + size + ' OFFSET ?').bind(start).all<{id: string; entity: string; entityId: string; action: string; beforeJson: string; afterJson: string; actor: string; actorId: string; createdAt: string}>();
   return {audit: rows.results, hasMore: rows.results.length === size};
 }
 
@@ -234,14 +233,14 @@ function moneyCents(value: unknown) {
   return amount;
 }
 
-export async function applyOperation(db: Sql, account: {id: string; name: string; role: string}, body: any, stamp: string) {
+export async function applyOperation(db: Sql, account: {id: string; name: string; role: string}, body: Record<string, unknown>, stamp: string) {
   const actor = account.name;
   const actorId = account.id;
   if (body.action === 'discard-uploads') {
     const keys = Array.isArray(body.keys) ? body.keys.filter((key: unknown) => typeof key === 'string' && /^[a-f0-9-]{36}$/.test(key)) : [];
     const removed: string[] = [];
     for (const key of keys) {
-      const row = await db.prepare("SELECT key FROM attachments WHERE key=? AND vendor_id='' AND created_by=?").bind(key, account.id).first<any>();
+      const row = await db.prepare("SELECT key FROM attachments WHERE key=? AND vendor_id='' AND created_by=?").bind(key, account.id).first<{key: string}>();
       if (!row) continue;
       await db.prepare('DELETE FROM attachments WHERE key=?').bind(key).run();
       removed.push(key);
@@ -258,9 +257,9 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     if (!hub) throw new Error('Hub not found.');
     const capacity = Number(body.capacity || 1);
     if (!Number.isInteger(capacity) || capacity < 1 || capacity > 500) throw new Error('Enter a capacity of at least 1.');
-    const existing = body.id ? await db.prepare('SELECT id,hub_id AS hubId,unit_code AS unitCode,capacity,status,notes FROM hub_units WHERE id=?').bind(body.id).first<any>() : await db.prepare('SELECT id,hub_id AS hubId,unit_code AS unitCode,capacity,status,notes FROM hub_units WHERE hub_id=? AND unit_code=?').bind(hubId, unitCode).first<any>();
+    const existing = body.id ? await db.prepare('SELECT id,hub_id AS hubId,unit_code AS unitCode,capacity,status,notes FROM hub_units WHERE id=?').bind(body.id).first<{id: string; hubId: string; unitCode: string; capacity: number; status: string; notes: string}>() : await db.prepare('SELECT id,hub_id AS hubId,unit_code AS unitCode,capacity,status,notes FROM hub_units WHERE hub_id=? AND unit_code=?').bind(hubId, unitCode).first<{id: string; hubId: string; unitCode: string; capacity: number; status: string; notes: string}>();
     const notes = text(body.notes, 300);
-    const held = await db.prepare('SELECT a.vendor_id AS vendorId FROM allocations a WHERE a.hub_id=? AND a.unit=? LIMIT 1').bind(hubId, unitCode).first<any>();
+    const held = await db.prepare('SELECT a.vendor_id AS vendorId FROM allocations a WHERE a.hub_id=? AND a.unit=? LIMIT 1').bind(hubId, unitCode).first<{vendorId: string}>();
     if (existing) {
       await db.prepare('UPDATE hub_units SET hub_id=?,unit_code=?,capacity=?,status=?,notes=? WHERE id=?').bind(hubId, unitCode, capacity, status, notes, existing.id).run();
       await writeAudit(db, 'hub-unit', hubId + ':' + unitCode, 'saved', {capacity: existing.capacity, status: existing.status, notes: existing.notes, unitCode: existing.unitCode}, {capacity, status, notes, unitCode}, actor, stamp, actorId);
@@ -274,9 +273,9 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
   if (body.action === 'unit-delete') {
     const id = text(body.id, 80);
     if (!id) throw new Error('Choose the unit to remove.');
-    const unit = await db.prepare('SELECT id,hub_id AS hubId,unit_code AS unitCode,capacity,status,notes FROM hub_units WHERE id=?').bind(id).first<any>();
+    const unit = await db.prepare('SELECT id,hub_id AS hubId,unit_code AS unitCode,capacity,status,notes FROM hub_units WHERE id=?').bind(id).first<{id: string; hubId: string; unitCode: string; capacity: number; status: string; notes: string}>();
     if (!unit) throw new Error('That unit record no longer exists.');
-    const holder = await db.prepare('SELECT a.vendor_id AS vendorId FROM allocations a WHERE a.hub_id=? AND a.unit=? LIMIT 1').bind(unit.hubId, unit.unitCode).first<any>();
+    const holder = await db.prepare('SELECT a.vendor_id AS vendorId FROM allocations a WHERE a.hub_id=? AND a.unit=? LIMIT 1').bind(unit.hubId, unit.unitCode).first<{vendorId: string}>();
     if (holder?.vendorId) throw new Error('Unit ' + unit.unitCode + ' is allocated to ' + holder.vendorId + '. Release or transfer the allocation first.');
     if (unit.status === 'occupied') throw new Error('Unit ' + unit.unitCode + ' is marked occupied. Set it to available before removing it.');
     await db.prepare('DELETE FROM hub_units WHERE id=?').bind(id).run();
@@ -377,7 +376,7 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     const category = text(body.category, 80);
     const id = text(body.id, 80);
     if (id) {
-      const existing = await db.prepare('SELECT id,rule_ref AS ruleRef,category,document_label AS documentLabel,validity_months AS validityMonths FROM requirements WHERE id=?').bind(id).first<any>();
+      const existing = await db.prepare('SELECT id,rule_ref AS ruleRef,category,document_label AS documentLabel,validity_months AS validityMonths FROM requirements WHERE id=?').bind(id).first<{id: string; ruleRef: string; category: string; documentLabel: string; validityMonths: number}>();
       if (!existing) throw new Error('That compliance requirement no longer exists.');
       await db.prepare('UPDATE requirements SET rule_ref=?,category=?,document_label=?,validity_months=? WHERE id=?').bind(ruleRef, category, label, months, id).run();
       await writeAudit(db, 'requirement', id, 'updated', existing, {ruleRef, category, documentLabel: label, validityMonths: months}, actor, stamp, actorId);
@@ -392,7 +391,7 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
   if (body.action === 'requirement-delete') {
     const id = text(body.id, 80);
     if (!id) throw new Error('Choose the compliance requirement to remove.');
-    const existing = await db.prepare('SELECT id,rule_ref AS ruleRef,category,document_label AS documentLabel,validity_months AS validityMonths FROM requirements WHERE id=?').bind(id).first<any>();
+    const existing = await db.prepare('SELECT id,rule_ref AS ruleRef,category,document_label AS documentLabel,validity_months AS validityMonths FROM requirements WHERE id=?').bind(id).first<{id: string; ruleRef: string; category: string; documentLabel: string; validityMonths: number}>();
     if (!existing) throw new Error('That compliance requirement no longer exists.');
     await db.prepare('DELETE FROM requirements WHERE id=?').bind(id).run();
     await writeAudit(db, 'requirement', id, 'removed', existing, null, actor, stamp, actorId);
@@ -404,7 +403,7 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     const severity = text(body.severity, 20);
     if (!owner) throw new Error('Enter who owns the follow-up.');
     if (severity && !['Low', 'Medium', 'High'].includes(severity)) throw new Error('Choose a severity.');
-    const open = await db.prepare("SELECT id,owner,severity,case_status FROM events WHERE id=? AND kind IN ('Warning','Violation','Inspection') AND resolved=0").bind(id).first<any>();
+    const open = await db.prepare("SELECT id,owner,severity,case_status FROM events WHERE id=? AND kind IN ('Warning','Violation','Inspection') AND resolved=0").bind(id).first<{id: string; owner: string; severity: string; case_status: string}>();
     if (!open) throw new Error('That case is no longer open.');
     const caseStatus = open.case_status && ['open', 'follow-up', 'escalated'].includes(open.case_status) ? open.case_status : 'open';
     await db.prepare('UPDATE events SET owner=?,severity=?,case_status=? WHERE id=?').bind(owner, severity, caseStatus, id).run();
@@ -427,7 +426,7 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     const id = text(body.id, 80);
     const note = text(body.note, 500);
     if (note.length < 3) throw new Error('Record why this entry is being reversed.');
-    const original = await db.prepare("SELECT id,vendor_id,kind,amount FROM events WHERE id=? AND kind IN ('Charge','Payment')").bind(id).first<any>();
+    const original = await db.prepare("SELECT id,vendor_id,kind,amount FROM events WHERE id=? AND kind IN ('Charge','Payment')").bind(id).first<{id: string; vendor_id: string; kind: string; amount: number}>();
     if (!original) throw new Error('Only a charge or payment can be reversed.');
     const already = await db.prepare('SELECT id FROM events WHERE reversal_of=?').bind(id).first();
     if (already) throw new Error('This entry has already been reversed.');
@@ -448,7 +447,7 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     const plan = text(body.plan, 500);
     if (!dateOk(due)) throw new Error('Enter a real date for the next visit.');
     if (plan.length < 3) throw new Error('Record what the next visit should check.');
-    const open = await db.prepare("SELECT id,due,checklist FROM events WHERE id=? AND kind IN ('Warning','Violation') AND resolved=0").bind(id).first<any>();
+    const open = await db.prepare("SELECT id,due,checklist FROM events WHERE id=? AND kind IN ('Warning','Violation') AND resolved=0").bind(id).first<{id: string; due: string; checklist: string}>();
     if (!open) throw new Error('That case is no longer open.');
     await db.prepare("UPDATE events SET due=?,checklist=?,case_status='follow-up' WHERE id=?").bind(due, plan, id).run();
     await writeAudit(db, 'case', id, 'scheduled', {due: open.due, plan: open.checklist}, {due, plan}, actor, stamp, actorId);
@@ -458,7 +457,7 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     const id = text(body.id, 80);
     const caseStatus = text(body.caseStatus, 20);
     if (!['open', 'follow-up', 'escalated'].includes(caseStatus)) throw new Error('Choose open, follow-up or escalated. Resolution is recorded on the case.');
-    const row = await db.prepare("SELECT id,case_status FROM events WHERE id=? AND kind IN ('Warning','Violation') AND resolved=0").bind(id).first<any>();
+    const row = await db.prepare("SELECT id,case_status FROM events WHERE id=? AND kind IN ('Warning','Violation') AND resolved=0").bind(id).first<{id: string; case_status: string}>();
     if (!row) throw new Error('That case is no longer open.');
     await db.prepare('UPDATE events SET case_status=? WHERE id=? AND resolved=0').bind(caseStatus, id).run();
     await writeAudit(db, 'case', id, 'transition', {caseStatus: row.case_status}, {caseStatus}, actor, stamp, actorId);
@@ -474,7 +473,7 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     const id = text(body.id, 80);
     const note = text(body.note, 500);
     if (note.length < 3) throw new Error('Record how this quarantined issue was reviewed or repaired.');
-    const issue = await db.prepare("SELECT id,entity,entity_id AS entityId,parent_id AS parentId,issue,payload FROM integrity_issues WHERE id=? AND resolved_at=''").bind(id).first<any>();
+    const issue = await db.prepare("SELECT id,entity,entity_id AS entityId,parent_id AS parentId,issue,payload FROM integrity_issues WHERE id=? AND resolved_at=''").bind(id).first<{id: string; entity: string; entityId: string; parentId: string; issue: string; payload: string}>();
     if (!issue) throw new Error('That integrity issue is already resolved or unavailable.');
     await db.prepare("UPDATE integrity_issues SET resolved_at=? WHERE id=? AND resolved_at=''").bind(stamp, id).run();
     await writeAudit(db, 'integrity-issue', id, 'resolved', issue, {note}, actor, stamp, actorId);
@@ -507,7 +506,7 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
   }
   if (body.action === 'edit-import') {
     const id = text(body.id, 80);
-    const row = await db.prepare('SELECT status,payload FROM import_rows WHERE id=?').bind(id).first<any>();
+    const row = await db.prepare('SELECT status,payload FROM import_rows WHERE id=?').bind(id).first<{status: string; payload: string}>();
     if (!row || row.status === 'approved') throw new Error('An approved import cannot be edited.');
     if (row.status === 'rejected' && text(body.reopen, 10) !== 'yes') throw new Error('A rejected row stays closed unless you choose to correct it.');
     const record = JSON.parse(row.payload);
@@ -526,7 +525,7 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
   if (body.action === 'reject-import') {
     const id = text(body.id, 80);
     const note = text(body.note, 300);
-    const row = await db.prepare('SELECT status FROM import_rows WHERE id=?').bind(id).first<any>();
+    const row = await db.prepare('SELECT status FROM import_rows WHERE id=?').bind(id).first<{status: string}>();
     if (!row || row.status === 'approved') throw new Error('An approved import cannot be rejected.');
     if (note.length < 3) throw new Error('Record why this row is rejected.');
     await db.prepare("UPDATE import_rows SET status='rejected', note=? WHERE id=? AND status<>'approved'").bind(note, id).run();
@@ -535,7 +534,7 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
   }
   if (body.action === 'approve-import') {
     const id = text(body.id, 80);
-    const row = await db.prepare("SELECT payload,status FROM import_rows WHERE id=?").bind(id).first<any>();
+    const row = await db.prepare("SELECT payload,status FROM import_rows WHERE id=?").bind(id).first<{payload: string; status: string}>();
     if (!row || row.status !== 'pending') throw new Error('Only a pending row can be approved.');
     const record = JSON.parse(row.payload);
     const vendor = {
@@ -572,7 +571,7 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     statements.push(db.prepare('INSERT INTO audit_log(id,entity,entity_id,action,before_json,after_json,actor,created_at) SELECT ?,?,?,?,?,?,?,? WHERE ' + claim).bind(crypto.randomUUID(), 'import', id, 'approved', JSON.stringify({status: 'pending'}).slice(0, 4000), JSON.stringify({vendorId: vendor.id}).slice(0, 4000), actor, stamp, id, note));
     statements.push(db.prepare("UPDATE import_rows SET status='needs-correction', note='The unit could not be allocated. Correct the hub and unit, or reject the row.' WHERE id=? AND status='approved' AND note=? AND NOT EXISTS (SELECT 1 FROM vendors WHERE id=?)").bind(id, note, vendor.id));
     await db.batch(statements);
-    const done = await db.prepare('SELECT status,note FROM import_rows WHERE id=?').bind(id).first<any>();
+    const done = await db.prepare('SELECT status,note FROM import_rows WHERE id=?').bind(id).first<{status: string; note: string}>();
     if (!done || done.note !== note) throw new Error('This row was already approved.');
     const saved = await db.prepare('SELECT id FROM vendors WHERE id=?').bind(vendor.id).first();
     if (!saved) throw new Error('The unit could not be allocated. The import row was not approved.');

@@ -35,6 +35,8 @@ export type Operations = {
   settings: {documentNote?: string};
 };
 
+type WorkspaceReply = {error?:string;message?:string;status?:string;reminders:Renewal[];windowDays:number;created:number;audit:Audit[];hasMore:boolean;sessions:{id:string;createdAt:string;expiresAt:string;device:string;current:boolean}[];users:{id:string;name:string;role:string}[]};
+
 const date = (value: string) => value ? new Date(value.length === 10 ? value + 'T12:00:00' : value).toLocaleDateString('en-ZA', {day: 'numeric', month: 'short', year: 'numeric'}) : 'Not recorded';
 const dateTime = (value: string) => value ? new Date(value).toLocaleString('en-ZA', {dateStyle: 'medium', timeStyle: 'short'}) : 'Not recorded';
 
@@ -69,7 +71,7 @@ export function Workspaces({page, vendors, entries, hubs, deliveries, operations
   operations: Operations;
   senderConnected: boolean;
   capabilities: Capability[];
-  save: (body: any) => Promise<boolean>;
+  save: (body: Record<string, unknown>) => Promise<boolean>;
   reload: () => Promise<void>;
   onOpen: (vendor: Vendor, tab?: string) => void;
 }) {
@@ -78,7 +80,7 @@ export function Workspaces({page, vendors, entries, hubs, deliveries, operations
   if (page === 'Follow-ups') return <FollowUps entries={entries} vendors={vendors} save={save} onOpen={onOpen} can={can} />;
   if (page === 'Reports') return <Reports vendors={vendors} entries={entries} tariffs={operations.tariffs} can={can} />;
   if (page === 'Unit inventory') return <Inventory hubs={hubs} units={operations.units} pitches={operations.pitches} history={operations.allocationHistory} vendorName={vendorName} save={save} can={can} />;
-  if (page === 'Permits & cards') return <Permits vendors={vendors} permits={operations.permits} documents={operations.permitDocuments} renewals={operations.renewals} save={save} onOpen={onOpen} can={can} />;
+  if (page === 'Permits & cards') return <Permits reload={reload} vendors={vendors} permits={operations.permits} documents={operations.permitDocuments} renewals={operations.renewals} save={save} onOpen={onOpen} can={can} />;
   if (page === 'Tariffs & reconciliation') return <Tariffs vendors={vendors} entries={entries} tariffs={operations.tariffs} save={save} can={can} />;
   if (page === 'Notice queue') return <NoticeQueue entries={entries} vendors={vendors} deliveries={deliveries} senderConnected={senderConnected} reload={reload} onOpen={onOpen} />;
   if (page === 'Audit') return <AuditList rows={operations.audit} integrity={operations.auditIntegrity} issues={operations.integrityIssues} save={save} can={can} />;
@@ -104,7 +106,7 @@ function BackupPanel({can}: {can: (capability: Capability) => boolean}) {
     try {
       const response = await fetch('/api/backup');
       if (!response.ok) {
-        const body: any = await response.json().catch(() => ({}));
+        const body = await response.json().catch(() => ({})) as Partial<WorkspaceReply>;
         throw new Error(body.error || 'The backup could not be prepared.');
       }
       const rows = response.headers.get('X-Backup-Rows') || '?';
@@ -189,7 +191,7 @@ function BackupPanel({can}: {can: (capability: Capability) => boolean}) {
   </section>;
 }
 
-function FollowUps({entries, vendors, save, onOpen, can}: {entries: Entry[]; vendors: Vendor[]; save: (body: any) => Promise<boolean>; onOpen: (vendor: Vendor, tab?: string) => void; can: (capability: Capability) => boolean}) {
+function FollowUps({entries, vendors, save, onOpen, can}: {entries: Entry[]; vendors: Vendor[]; save: (body: Record<string, unknown>) => Promise<boolean>; onOpen: (vendor: Vendor, tab?: string) => void; can: (capability: Capability) => boolean}) {
   const today = new Date().toISOString().slice(0, 10);
   const [renewals, setRenewals] = useState<Renewal[]>([]);
   const [renewalBusy, setRenewalBusy] = useState(false);
@@ -202,7 +204,7 @@ function FollowUps({entries, vendors, save, onOpen, can}: {entries: Entry[]; ven
     setRenewalMessage('');
     try {
       const response = await fetch('/api/renewals', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: preview ? 'preview' : 'scan'})});
-      const body: any = await response.json();
+      const body: WorkspaceReply = await response.json();
       if (!response.ok) throw new Error(body.error || 'The renewal scan could not be completed.');
       setRenewals(Array.isArray(body.reminders) ? body.reminders : []);
       setRenewalMessage(preview
@@ -241,7 +243,7 @@ function DatasetNotice({label}: {label: string}) {
   return <p className="hint">These {label} are only what staff have entered here. Their presence does not confirm that the municipality’s verified operational dataset is complete.</p>;
 }
 
-function Inventory({hubs, units, pitches, history, vendorName, save, can}: {hubs: Hub[]; units: Unit[]; pitches: Pitch[]; history: History[]; vendorName: (id: string) => string; save: (body: any) => Promise<boolean>; can: (capability: Capability) => boolean}) {
+function Inventory({hubs, units, pitches, history, vendorName, save, can}: {hubs: Hub[]; units: Unit[]; pitches: Pitch[]; history: History[]; vendorName: (id: string) => string; save: (body: Record<string, unknown>) => Promise<boolean>; can: (capability: Capability) => boolean}) {
   const [editing, setEditing] = useState<Unit | null>(null);
   const [busy, setBusy] = useState(false);
   const clear = () => setEditing(null);
@@ -274,12 +276,12 @@ function Inventory({hubs, units, pitches, history, vendorName, save, can}: {hubs
   </>;
 }
 
-function PitchForm({pitches, save}: {pitches: Pitch[]; save: (body: any) => Promise<boolean>}) {
+function PitchForm({pitches, save}: {pitches: Pitch[]; save: (body: Record<string, unknown>) => Promise<boolean>}) {
   const [editing, setEditing] = useState<Pitch | null>(null);
   return <><section className="panel"><div className="panel-head"><div><h2>Recorded pitches</h2><p>Saving a pitch with a vendor ID also updates that vendor’s map coordinates.</p></div></div><div className="table-wrap stack"><table><thead><tr><th scope="col" data-label="Pitch">Pitch</th><th scope="col" data-label="Vendor">Vendor</th><th scope="col" data-label="Area">Area</th><th scope="col" data-label="GPS">GPS</th><th scope="col" data-label=""></th></tr></thead><tbody>{pitches.map(pitch => <tr key={pitch.id}><td data-label="Pitch">{pitch.pitchCode}</td><td data-label="Vendor">{pitch.vendorId || 'Not linked'}</td><td data-label="Area">{pitch.area}</td><td data-label="GPS">{pitch.lat && pitch.lng ? pitch.lat + ', ' + pitch.lng : 'Not recorded'}</td><td data-label=""><button className="secondary" type="button" onClick={() => setEditing(pitch)}>Edit</button></td></tr>)}</tbody></table>{!pitches.length && <div className="empty">No pitches recorded yet.</div>}</div></section><form className="panel" key={editing?.id || 'new'} onSubmit={async event => { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); if (await save({action: 'pitch', id: editing?.id || '', pitchCode: data.get('pitchCode'), ward: data.get('ward'), area: data.get('area'), activity: data.get('activity'), lat: data.get('lat'), lng: data.get('lng'), accuracy: data.get('accuracy'), verifiedAt: data.get('verifiedAt'), vendorId: data.get('vendorId')})) { setEditing(null); form.reset(); } }}><div className="panel-head"><div><h2>{editing ? 'Edit trading pitch' : 'Trading pitch'}</h2><p>Ward, permitted activity and the GPS check for a street pitch.</p></div></div><div className="form-grid"><label>Pitch reference<input name="pitchCode" required defaultValue={editing?.pitchCode || ''} /></label><label>Vendor ID<input name="vendorId" defaultValue={editing?.vendorId || ''} /></label><label>Ward<input name="ward" defaultValue={editing?.ward || ''} /></label><label>Area<input name="area" defaultValue={editing?.area || ''} /></label><label>Permitted activity<input name="activity" defaultValue={editing?.activity || ''} /></label><label>Latitude<input name="lat" defaultValue={editing?.lat || ''} /></label><label>Longitude<input name="lng" defaultValue={editing?.lng || ''} /></label><label>GPS accuracy<input name="accuracy" placeholder="metres" defaultValue={editing?.accuracy || ''} /></label><label>Verified on<input name="verifiedAt" type="date" defaultValue={editing?.verifiedAt || ''} /></label></div><div className="modal-foot"><button className="primary" type="submit">{editing ? 'Update pitch' : 'Save pitch'}</button>{editing && <button className="secondary" type="button" onClick={() => setEditing(null)}>Cancel edit</button>}</div></form></>;
 }
 
-function Permits({vendors, permits, documents, renewals, save, onOpen, can}: {vendors: Vendor[]; permits: PermitRow[]; documents: PermitDocument[]; renewals: Renewal[]; save: (body: any) => Promise<boolean>; onOpen: (vendor: Vendor, tab?: string) => void; can: (capability: Capability) => boolean}) {
+function Permits({vendors, permits, documents, renewals, save, onOpen, can, reload}: {reload:()=>Promise<void>; vendors: Vendor[]; permits: PermitRow[]; documents: PermitDocument[]; renewals: Renewal[]; save: (body: Record<string, unknown>) => Promise<boolean>; onOpen: (vendor: Vendor, tab?: string) => void; can: (capability: Capability) => boolean}) {
   const [today] = useState(() => new Date().toISOString().slice(0, 10));
   const [soon] = useState(() => new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
   const expiring = vendors.filter(vendor => vendor.expires && vendor.expires <= soon);
@@ -298,12 +300,12 @@ function Permits({vendors, permits, documents, renewals, save, onOpen, can}: {ve
     setCardMessage('');
     try {
       const response = await fetch('/api/permit', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'card-event', vendorId: cardFor, kind: cardKind, cardSerial, note: cardNote})});
-      const body: any = await response.json();
+      const body: WorkspaceReply = await response.json();
       if (!response.ok) throw new Error(body.error || 'The card event could not be recorded.');
       setCardMessage('Card event recorded: ' + cardKind + '.');
       setCardSerial('');
       setCardNote('');
-      await save({action: 'settings', documentNote: undefined}).catch(() => false);
+      await reload();
     } catch (cause) {
       setCardError(cause instanceof Error ? cause.message : 'The card event could not be recorded.');
     } finally {
@@ -354,11 +356,11 @@ function Permits({vendors, permits, documents, renewals, save, onOpen, can}: {ve
   </>;
 }
 
-function PermitAction({vendors, save, can}: {vendors: Vendor[]; save: (body: any) => Promise<boolean>; can: (capability: Capability) => boolean}) {
+function PermitAction({vendors, save, can}: {vendors: Vendor[]; save: (body: Record<string, unknown>) => Promise<boolean>; can: (capability: Capability) => boolean}) {
   return <form className="panel" onSubmit={async event => { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); if (await save({action: 'permit', vendorId: data.get('vendorId'), status: data.get('status'), note: data.get('note'), cardSerial: data.get('cardSerial'), expires: data.get('expires')})) form.reset(); }}><div className="panel-head"><div><h2>Record a permit decision</h2><p>Review, approval, card issue, replacement, renewal or revocation. Each one stays in the history.</p></div></div><div className="form-grid"><label>Vendor<select name="vendorId" required defaultValue=""><option value="" disabled>Choose a vendor</option>{vendors.map(vendor => <option key={vendor.id} value={vendor.id}>{vendor.business} · {vendor.id}</option>)}</select></label><label>Action<select name="status" defaultValue="review"><option value="review">Review</option><option value="approved">Approve</option><option value="issued">Issue card</option><option value="replacement">Replace card</option><option value="renewed">Renew</option><option value="revoked">Revoke</option></select></label><label>Card serial<input name="cardSerial" /></label><label>New expiry<input name="expires" type="date" /></label><label>Decision note<input name="note" required minLength={3} /></label></div><div className="modal-foot"><button className="primary" type="submit" disabled={!can('permits.write')}>Save decision</button></div>{!can('permits.write') && <p className="hint">Your role can review permits but cannot record a permit decision.</p>}</form>;
 }
 
-function Tariffs({vendors, entries, tariffs, save, can}: {vendors: Vendor[]; entries: Entry[]; tariffs: Tariff[]; save: (body: any) => Promise<boolean>; can: (capability: Capability) => boolean}) {
+function Tariffs({vendors, entries, tariffs, save, can}: {vendors: Vendor[]; entries: Entry[]; tariffs: Tariff[]; save: (body: Record<string, unknown>) => Promise<boolean>; can: (capability: Capability) => boolean}) {
   const payments = entries.filter(entry => entry.kind === 'Payment');
   const reversals = entries.filter(entry => entry.kind === 'Reversal');
   async function reconcile(entry: Entry) {
@@ -393,7 +395,7 @@ function NoticeQueue({entries, vendors, deliveries, senderConnected, reload, onO
     setMessage('');
     try {
       const response = await fetch('/api/notice', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'send', eventId, idempotencyKey: crypto.randomUUID().replace(/-/g, '').slice(0, 24)})});
-      const body: any = await response.json().catch(() => ({}));
+      const body = await response.json().catch(() => ({})) as Partial<WorkspaceReply>;
       if (!response.ok) throw new Error(body.error || 'The notice was not sent.');
       setMessage(body.status ? body.status + '. ' + (body.message || '') : (body.message || 'The sender responded.'));
     } catch (error) {
@@ -426,7 +428,7 @@ function AuditList({rows, integrity, issues, save, can}: {rows: Audit[]; integri
     setError('');
     try {
       const response = await fetch('/api/register?auditOffset=' + visible.length);
-      const body: any = await response.json();
+      const body: WorkspaceReply = await response.json();
       if (!response.ok) throw new Error(body.error || 'Older audit records could not be loaded.');
       if (Array.isArray(body.audit)) setMore(current => [...current, ...body.audit]);
       setHasMore(Boolean(body.hasMore));
@@ -453,7 +455,7 @@ function AuditList({rows, integrity, issues, save, can}: {rows: Audit[]; integri
     </div>{filtered.map(row => { const changes = auditChanges(row); return <div className="history" key={row.id}><span className="timeline-dot" /><div><strong>{row.entity.replaceAll('-', ' ')} · {row.action}</strong><p className="mono">{row.entityId}</p><small>{dateTime(row.createdAt)} · {row.actor}</small>{changes.length > 0 && <ul className="audit-diff">{changes.map(change => <li key={change.key}><span>{change.key}</span><del>{change.before}</del><ins>{change.after}</ins></li>)}</ul>}</div></div>; })}{hasMore && <button className="secondary" type="button" disabled={loading} onClick={loadOlder}>{loading ? 'Loading older records…' : 'Load older records'}</button>}{!filtered.length && <div className="empty">No matching audit records.</div>}</section>;
 }
 
-function SettingsPanel({settings, requirements, senderConnected, save, can}: {settings: {documentNote?: string}; requirements: Requirement[]; senderConnected: boolean; save: (body: any) => Promise<boolean>; can: (capability: Capability) => boolean}) {
+function SettingsPanel({settings, requirements, senderConnected, save, can}: {settings: {documentNote?: string}; requirements: Requirement[]; senderConnected: boolean; save: (body: Record<string, unknown>) => Promise<boolean>; can: (capability: Capability) => boolean}) {
   const [editing, setEditing] = useState<Requirement | null>(null);
   const [note, setNote] = useState(settings.documentNote || '');
   const [busy, setBusy] = useState(false);
@@ -485,7 +487,7 @@ function SettingsPanel({settings, requirements, senderConnected, save, can}: {se
   </>;
 }
 
-function ImportPanel({rows, save, can}: {rows: ImportRow[]; save: (body: any) => Promise<boolean>; can: (capability: Capability) => boolean}) {
+function ImportPanel({rows, save, can}: {rows: ImportRow[]; save: (body: Record<string, unknown>) => Promise<boolean>; can: (capability: Capability) => boolean}) {
   const [editing, setEditing] = useState<ImportRow | null>(null);
   const record = editing ? JSON.parse(editing.payload || '{}') : null;
   return <>
@@ -550,7 +552,7 @@ function SessionsPanel() {
     setError('');
     try {
       const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'sessions', userId})});
-      const body: any = await response.json();
+      const body: WorkspaceReply = await response.json();
       if (body.sessions) setSessions(body.sessions);
       else { setSessions([]); setError(body.error || 'Could not load sessions.'); }
     } catch {
@@ -578,7 +580,7 @@ function SessionsPanel() {
       try {
         const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'users'})});
         if (!response.ok) return;
-        const body: any = await response.json();
+        const body: WorkspaceReply = await response.json();
         if (!cancelled && Array.isArray(body.users)) setUsers(body.users);
       } catch { /* Only a super user can list every account. */ }
     })();
@@ -589,7 +591,7 @@ function SessionsPanel() {
     (async () => {
       try {
         const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'sessions'})});
-        const body: any = await response.json();
+        const body: WorkspaceReply = await response.json();
         if (cancelled) return;
         if (body.sessions) setSessions(body.sessions);
         else { setSessions([]); setError(body.error || 'Could not load sessions.'); }

@@ -6,15 +6,15 @@ export type Account = {id: string; name: string; email: string; role: string; ac
 type Sql = {
   prepare: (query: string) => {
     bind: (...args: unknown[]) => SqlStatement;
-    first: <T = any>() => Promise<T | null>;
-    all: <T = any>() => Promise<{results: T[]}>;
+    first: <T = Record<string, unknown>>() => Promise<T | null>;
+    all: <T = Record<string, unknown>>() => Promise<{results: T[]}>;
     run: () => Promise<unknown>;
   };
 };
 
 type SqlStatement = {
-  first: <T = any>() => Promise<T | null>;
-  all: <T = any>() => Promise<{results: T[]}>;
+  first: <T = Record<string, unknown>>() => Promise<T | null>;
+  all: <T = Record<string, unknown>>() => Promise<{results: T[]}>;
   run: () => Promise<unknown>;
 };
 
@@ -71,8 +71,6 @@ export function passwordPending(account: Account) {
   return Number(account.mustChangePassword) === 1;
 }
 
-/** Schema changes belong in drizzle migrations. This stays so existing routes can call it without creating tables. */
-export async function ensureAccounts(_db: Sql) {}
 
 export function requestIsSecure(req: Request) {
   const forwarded = (req.headers.get('x-forwarded-proto') || '').split(',')[0].trim().toLowerCase();

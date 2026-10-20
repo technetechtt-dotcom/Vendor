@@ -1,5 +1,5 @@
 import {database, bootstrapToken} from '../../../lib/server';
-import {checkPassword, clearOtherSessions, clearSessions, clientIp, ensureAccounts, hashPassword, isLocalHost, openSession, passwordPending, publicAccount, requestIsSecure, sessionCookie, sessionToken, sessionUser} from '../../../lib/accounts';
+import {checkPassword, clearOtherSessions, clearSessions, clientIp, hashPassword, isLocalHost, openSession, passwordPending, publicAccount, requestIsSecure, sessionCookie, sessionToken, sessionUser} from '../../../lib/accounts';
 import {fieldCorsHeaders, withFieldCors, mutationOriginError} from '../../../lib/cors';
 
 const roles = ['superuser', 'office', 'finance', 'field'];
@@ -61,13 +61,12 @@ async function recordAttempt(db: ReturnType<typeof database>, email: string, ip:
 
 async function handleGet(req: Request) {
   const db = database();
-  await ensureAccounts(db);
   const account = await sessionUser(db, req);
   if (!account) return json({user: null, setupRequired: await setupRequired(db), setupTokenRequired: !isLocalHost(new URL(req.url).hostname)});
   return json({user: publicAccount(account)});
 }
 
-async function handleSetup(req: Request, db: ReturnType<typeof database>, body: any) {
+async function handleSetup(req: Request, db: ReturnType<typeof database>, body: Record<string, unknown>) {
   const rejected = mutationOriginError(req);
   if (rejected) return rejected;
   if (cleartextBlocked(req)) return json({error: 'Administrator setup requires a secure https connection.'}, 400);
@@ -99,12 +98,11 @@ async function handleSetup(req: Request, db: ReturnType<typeof database>, body: 
 
 async function handlePost(req: Request) {
   const db = database();
-  await ensureAccounts(db);
   const origin = req.headers.get('origin');
   if (origin && origin !== new URL(req.url).origin && !fieldCorsHeaders(req)) {
     return json({error: 'Invalid request origin.'}, 403);
   }
-  let body: any;
+  let body: Record<string, unknown>;
   try {
     body = await req.json();
   } catch {
@@ -117,7 +115,7 @@ async function handlePost(req: Request) {
     const password = String(body.password || '');
     const ip = clientIp(req);
     if (await tooManyAttempts(db, email, ip)) return json({error: 'Too many sign-in attempts. Try again in 15 minutes.'}, 429);
-    const row = await db.prepare('SELECT id,name,email,role,active,password_hash,must_change_password AS mustChangePassword FROM users WHERE email=?').bind(email).first<any>();
+    const row = await db.prepare('SELECT id,name,email,role,active,password_hash,must_change_password AS mustChangePassword FROM users WHERE email=?').bind(email).first<{id: string; name: string; email: string; role: string; active: number; password_hash: string; mustChangePassword: number}>();
     const valid = await checkPassword(password, row?.active ? row.password_hash : undefined);
     if (!row || !row.active || !valid) {
       await recordAttempt(db, email, ip);
@@ -152,7 +150,7 @@ async function handlePost(req: Request) {
   if (passwordPending(account)) return json({error: 'Change your password before continuing.'}, 403);
   if (body.action === 'sessions') {
     const userId = account.role === 'superuser' ? String(body.userId || account.id) : account.id;
-    const rows = await db.prepare('SELECT token,created_at AS createdAt,expires_at AS expiresAt,device FROM sessions WHERE user_id=? AND expires_at>? ORDER BY created_at DESC').bind(userId, new Date().toISOString()).all<any>();
+    const rows = await db.prepare('SELECT token,created_at AS createdAt,expires_at AS expiresAt,device FROM sessions WHERE user_id=? AND expires_at>? ORDER BY created_at DESC').bind(userId, new Date().toISOString()).all<{token: string; createdAt: string; expiresAt: string; device: string}>();
     const current = sessionToken(req);
     return json({sessions: await Promise.all(rows.results.map(async row => ({id: await publicSessionId(row.token), createdAt: row.createdAt, expiresAt: row.expiresAt, device: friendlyDevice(row.device || ''), current: row.token === current})))});
   }
@@ -178,11 +176,11 @@ async function handlePost(req: Request) {
   }
   if (account.role !== 'superuser') return json({error: 'Only the super user can manage accounts.'}, 403);
   if (body.action === 'users') {
-    const rows = await db.prepare('SELECT id,name,email,role,active,must_change_password AS mustChangePassword,created_at AS createdAt FROM users ORDER BY created_at').all<any>();
+    const rows = await db.prepare('SELECT id,name,email,role,active,must_change_password AS mustChangePassword,created_at AS createdAt FROM users ORDER BY created_at').all<{id: string; name: string; email: string; role: string; active: number; mustChangePassword: number; createdAt: string}>();
     return json({users: rows.results});
   }
   if (body.action === 'save-user') {
-    const input = body.user || {};
+    const input: Record<string, unknown> = body.user && typeof body.user === 'object' && !Array.isArray(body.user) ? body.user as Record<string, unknown> : {};
     const name = String(input.name || '').trim().replace(/\s+/g, ' ');
     const email = String(input.email || '').trim().toLowerCase();
     const role = String(input.role || '');
@@ -191,14 +189,14 @@ async function handlePost(req: Request) {
     if (name.length < 2 || name.length > 80) return json({error: 'Enter the person’s name.'}, 400);
     if (!validEmail(email)) return json({error: 'Enter a valid email address.'}, 400);
     if (!roles.includes(role)) return json({error: 'Choose a role.'}, 400);
-    const existing = input.id ? await db.prepare('SELECT id,role,active FROM users WHERE id=?').bind(input.id).first<any>() : null;
+    const existing = input.id ? await db.prepare('SELECT id,role,active FROM users WHERE id=?').bind(input.id).first<{id: string; role: string; active: number}>() : null;
     if (input.id && !existing) return json({error: 'User no longer exists.'}, 404);
-    const duplicate = await db.prepare('SELECT id FROM users WHERE email=? AND id<>?').bind(email, existing?.id || '').first<any>();
+    const duplicate = await db.prepare('SELECT id FROM users WHERE email=? AND id<>?').bind(email, existing?.id || '').first<{id: string}>();
     if (duplicate) return json({error: 'That email address is already in use.'}, 409);
     if (!existing && password.length < 8) return json({error: 'Set a password of at least 8 characters.'}, 400);
     if (password && (password.length < 8 || password.toLowerCase() === email)) return json({error: 'Set a password of at least 8 characters that is not the email address.'}, 400);
     if (existing?.role === 'superuser' && (role !== 'superuser' || !active)) {
-      const others = await db.prepare("SELECT COUNT(*) AS n FROM users WHERE role='superuser' AND active=1 AND id<>?").bind(existing.id).first<any>();
+      const others = await db.prepare("SELECT COUNT(*) AS n FROM users WHERE role='superuser' AND active=1 AND id<>?").bind(existing.id).first<{n: number}>();
       if (!others?.n) return json({error: 'Keep at least one active super user.'}, 400);
     }
     const now = new Date().toISOString();

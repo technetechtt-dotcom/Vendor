@@ -3,7 +3,8 @@ import {useEffect, useState} from 'react';
 import {Building2, Check, Loader2} from 'lucide-react';
 
 export type Account = {id: string; name: string; email: string; role: 'superuser' | 'office' | 'finance' | 'field'; mustChangePassword?: boolean};
-type OrgUser = Account & {active: number; mustChangePassword?: number};
+type OrgUser = Omit<Account, 'mustChangePassword'> & {active: number; mustChangePassword?: number};
+type AuthReply = {error?: string; user: Account; users: OrgUser[]};
 
 const roleLabel = (role: string) => role === 'superuser' ? 'Super user' : role === 'finance' ? 'Finance officer' : role === 'field' ? 'Field officer' : 'Registration / compliance';
 
@@ -35,7 +36,7 @@ export function LoginScreen({onSuccess, setupRequired = false, setupTokenRequire
           try {
             if (setupRequired && password !== confirm) throw new Error('Enter the same password twice.');
             const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(setupRequired ? {action: 'setup', name, email, password, setupToken} : {action: 'login', email, password})});
-            const body: any = await response.json();
+            const body: AuthReply = await response.json();
             if (!response.ok) throw new Error(body.error || 'Sign-in failed');
             onSuccess(body.user);
           } catch (cause) {
@@ -81,7 +82,7 @@ export function ChangePasswordScreen({onSuccess, onSignOut}: {onSuccess: (user: 
           setBusy(true);
           try {
             const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'change-password', currentPassword, password})});
-            const body: any = await response.json();
+            const body: AuthReply = await response.json();
             if (!response.ok) throw new Error(body.error || 'Could not change the password');
             onSuccess(body.user);
           } catch (cause) {
@@ -110,7 +111,7 @@ export function UsersScreen() {
   const [busy, setBusy] = useState(false);
   async function load() {
     const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'users'})});
-    const body: any = await response.json();
+    const body: AuthReply = await response.json();
     if (!response.ok) throw new Error(body.error || 'Could not load users');
     setUsers(body.users);
   }
@@ -134,7 +135,7 @@ export function UsersScreen() {
         setNotice('');
         try {
           const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'save-user', user: draft})});
-          const body: any = await response.json();
+          const body: AuthReply = await response.json();
           if (!response.ok) throw new Error(body.error || 'Could not save this user');
           setDraft({id: '', name: '', email: '', role: 'office', password: '', active: true});
           setNotice(draft.id ? 'User updated.' : 'User added.');
@@ -158,7 +159,7 @@ export function UsersScreen() {
         <div className="modal-foot user-form-actions"><button className="secondary" type="button" onClick={() => setDraft({id: '', name: '', email: '', role: 'office', password: '', active: true})}>Clear</button><button className="primary" disabled={busy} type="submit">{busy ? <Loader2 size={16} className="spin" /> : <Check size={16} />}{draft.id ? 'Save user' : 'Add user'}</button></div>
       </form>
       <div className="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Access</th><th></th></tr></thead><tbody>
-        {users.map(user => <tr key={user.id}><td><strong>{user.name}</strong></td><td>{user.email}</td><td>{roleLabel(user.role)}</td><td>{user.active ? (user.mustChangePassword ? 'Must change password' : 'Active') : 'Disabled'}</td><td><button className="text-button" type="button" onClick={() => { setDraft({id: user.id, name: user.name, email: user.email, role: user.role, password: '', active: !!user.active}); setNotice(''); setError(''); }}>Edit</button><button className="text-button" type="button" onClick={async () => { setError(''); setNotice(''); try { const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'revoke-sessions', userId: user.id})}); const body: any = await response.json(); if (!response.ok) throw new Error(body.error || 'Could not sign out devices'); setNotice('Signed out devices for ' + user.name + '.'); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not sign out devices'); } }}>Sign out devices</button></td></tr>)}
+        {users.map(user => <tr key={user.id}><td><strong>{user.name}</strong></td><td>{user.email}</td><td>{roleLabel(user.role)}</td><td>{user.active ? (user.mustChangePassword ? 'Must change password' : 'Active') : 'Disabled'}</td><td><button className="text-button" type="button" onClick={() => { setDraft({id: user.id, name: user.name, email: user.email, role: user.role, password: '', active: !!user.active}); setNotice(''); setError(''); }}>Edit</button><button className="text-button" type="button" onClick={async () => { setError(''); setNotice(''); try { const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'revoke-sessions', userId: user.id})}); const body: AuthReply = await response.json(); if (!response.ok) throw new Error(body.error || 'Could not sign out devices'); setNotice('Signed out devices for ' + user.name + '.'); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not sign out devices'); } }}>Sign out devices</button></td></tr>)}
       </tbody></table></div>
     </section>
   );
