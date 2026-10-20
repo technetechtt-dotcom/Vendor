@@ -18,8 +18,8 @@ export default function FieldHelp() {
       </ul>
       <h2>Phone data</h2>
       <ul>
-        <li>Draft visits, the send queue, cached vendor profiles and GPS findings stay on that phone in local storage for the signed-in official and register address.</li>
-        <li>They are not the municipal register. Keep the phone locked.</li>
+        <li>Draft visits, the send queue, cached vendor profiles and GPS findings are encrypted on that phone for the signed-in official and register address.</li>
+        <li>The PIN and original device key protect these phone copies. They are not the municipal register. Keep the phone locked; losing the PIN or original device key can make unsent records unrecoverable.</li>
         <li>If a phone is lost, sign out its session from the office Sessions workspace and ask your device administrator to lock or erase that phone. Clearing a replacement phone does not erase the lost phone.</li>
         <li>Rejected visits stay until a corrected submission succeeds or an official dismisses them. Offline recovery remains available to review history even when nothing is waiting.</li>
       </ul>

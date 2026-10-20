@@ -84,5 +84,5 @@ export async function runScenarios(send, base = 'https://staging.example') {
     const response = await send(new Request(base + path, {method: 'POST', headers: {origin: 'https://hostile.example', 'Content-Type': 'application/json'}, body: '{}'}));
     assert.equal(response.status, 403, path + ': hostile origin was accepted');
   }
-  return {vendorId, ownerToken: owner, fieldCredentials: credentials.field, checks: ['bootstrap', 'temporary passwords', 'all four roles', 'registration', 'allocation conflict', 'lookup', 'fees', 'payment replay', 'reconciliation', 'permit/card lifecycle', 'notice permissions', 'case resolution', 'audit seal', 'backup verification', 'sessions', 'hostile origins']};
+  return {vendorId, ownerToken: owner, fieldCredentials: credentials.field, fieldToken: accounts.field, checks: ['bootstrap', 'temporary passwords', 'all four roles', 'registration', 'allocation conflict', 'lookup', 'fees', 'payment replay', 'reconciliation', 'permit/card lifecycle', 'notice permissions', 'case resolution', 'audit seal', 'backup verification', 'sessions', 'hostile origins']};
 }

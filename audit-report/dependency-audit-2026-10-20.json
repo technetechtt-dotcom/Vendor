@@ -1,0 +1,20 @@
+{
+  "date": "2026-10-20",
+  "scope": "production dependency trees, npm audit",
+  "office": {
+    "info": 0,
+    "low": 0,
+    "moderate": 0,
+    "high": 0,
+    "critical": 0,
+    "total": 0
+  },
+  "field": {
+    "info": 0,
+    "low": 0,
+    "moderate": 0,
+    "high": 0,
+    "critical": 0,
+    "total": 0
+  }
+}

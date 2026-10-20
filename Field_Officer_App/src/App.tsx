@@ -826,15 +826,15 @@ export function App() {
               <span className="badge neutral">{vendor.type} trader</span>
               <span className="muted">Expires {date(vendor.expires)}</span>
             </div>
-            <div className="field-tabs">
+            <div className="field-tabs" role="tablist" aria-label="Vendor record sections" onKeyDown={event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;const items=[...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')];const current=items.indexOf(event.target as HTMLButtonElement);if(current<0)return;event.preventDefault();const next=event.key==='Home'?0:event.key==='End'?items.length-1:(current+(event.key==='ArrowRight'?1:-1)+items.length)%items.length;items[next].focus();items[next].click();}}>
               {['Profile', 'Fees', 'Compliance'].map(name => (
-                <button key={name} className={name === tab ? 'active' : ''} onClick={() => setTab(name)}>
+                <button key={name} role="tab" id={'field-tab-'+name.toLowerCase()} aria-controls={'field-panel-'+name.toLowerCase()} aria-selected={name===tab} tabIndex={name===tab?0:-1} className={name === tab ? 'active' : ''} onClick={() => setTab(name)}>
                   {name === 'Fees' ? <Wallet size={16} /> : name === 'Compliance' ? <ShieldCheck size={16} /> : <MapPin size={16} />} {name}
                 </button>
               ))}
             </div>
             {tab === 'Profile' && (
-              <section className="field-panel">
+              <section className="field-panel" role="tabpanel" tabIndex={0} id="field-panel-profile" aria-labelledby="field-tab-profile">
                 <h2>Registered trading location</h2>
                 <p className="field-location">{vendor.type === 'Formal' ? vendor.hub : vendor.address || 'Street trading'}</p>
                 <dl>
@@ -851,7 +851,7 @@ export function App() {
               </section>
             )}
             {tab === 'Fees' && (
-              <>
+              <div role="tabpanel" tabIndex={0} id="field-panel-fees" aria-labelledby="field-tab-fees">
                 <div className="field-balance"><span>Recorded account balance</span><strong>{money(balance(vendor.id, events))}</strong><p>{balance(vendor.id, events) > 0 ? 'Outstanding fees' : balance(vendor.id, events) < 0 ? 'Credit balance' : 'Account settled'}</p></div>
                 <section className="field-panel">
                   <h2>Charges & received payments</h2>
@@ -861,10 +861,10 @@ export function App() {
                   {!events.some(entry => ['Charge', 'Payment', 'Reversal'].includes(entry.kind)) && <p className="muted">No charges, payments or reversals recorded.</p>}
                 </section>
                 <p className="field-help">Fee balance is separate from permit approval. Field visits do not process payments.</p>
-              </>
+              </div>
             )}
             {tab === 'Compliance' && (
-              <section className="field-panel">
+              <section className="field-panel" role="tabpanel" tabIndex={0} id="field-panel-compliance" aria-labelledby="field-tab-compliance">
                 <div className="field-section-title"><h2>Compliance & visits</h2><span>{open.length} open cases</span></div>
                 {events.filter(entry => ['Inspection', 'Warning', 'Violation', 'Resolution', 'Escalation'].includes(entry.kind)).map(entry => (
                   <div className="field-entry" key={entry.id}>

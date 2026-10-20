@@ -10,10 +10,10 @@ const VERSION = FIELD_APP_VERSION;
 const FILE_NAME = FIELD_APP_FILE;
 
 const RELEASE_NOTES = [
-  'Add this file to the register as Field_Officer_App/releases/' + FILE_NAME + ', then rebuild the register so it is published under /releases/.',
+  'Place the verified APK and its generated JSON verification manifest in Field_Officer_App/releases/, then rebuild the office register.',
   'Get the signed package with: cd Field_Officer_App && npm run apk:release',
   'A release build needs the municipality key in android/keystore.properties (see keystore.properties.example).',
-  'On this server the APK is published on the running host under /releases/, because local development cannot write site assets.',
+  'The office build publishes the package only when its version, signature manifest and checksum agree. Until then installation status is pending.',
 ];
 
 function json(body: unknown, status = 200) {
