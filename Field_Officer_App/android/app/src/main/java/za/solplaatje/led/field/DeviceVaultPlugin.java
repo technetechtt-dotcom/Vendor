@@ -19,27 +19,39 @@ import javax.crypto.spec.GCMParameterSpec;
 @CapacitorPlugin(name = "DeviceVault")
 public class DeviceVaultPlugin extends Plugin {
     private static final String ALIAS = "solplaatje.field.vault.v1";
+    private String alias = ALIAS;
+    public DeviceVaultPlugin() {}
+    DeviceVaultPlugin(String testAlias) {alias = testAlias;}
     private SecretKey getKey(boolean create) throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore");
         store.load(null);
-        if (store.containsAlias(ALIAS)) return (SecretKey) store.getKey(ALIAS, null);
+        if (store.containsAlias(alias)) return (SecretKey) store.getKey(alias, null);
         if (!create) throw new IllegalStateException("Original device key is unavailable");
         KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
-        generator.init(new KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+        generator.init(new KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(256).setRandomizedEncryptionRequired(true).build());
         return generator.generateKey();
+    }
+    String sealValue(String value) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.ENCRYPT_MODE, getKey(true));
+        byte[] encrypted = cipher.doFinal(value.getBytes(StandardCharsets.UTF_8));
+        return Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP) + "." + Base64.encodeToString(encrypted, Base64.NO_WRAP);
+    }
+    String openValue(String value) throws Exception {
+        String[] parts = value.split("\\.", 2);
+        if (parts.length != 2) throw new IllegalArgumentException("Invalid encrypted device data");
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.DECRYPT_MODE, getKey(false), new GCMParameterSpec(128, Base64.decode(parts[0], Base64.NO_WRAP)));
+        return new String(cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)), StandardCharsets.UTF_8);
     }
     @PluginMethod
     public void seal(PluginCall call) {
         try {
             String value = call.getString("value");
             if (value == null) {call.reject("Missing vault data"); return;}
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.ENCRYPT_MODE, getKey(true));
-            byte[] encrypted = cipher.doFinal(value.getBytes(StandardCharsets.UTF_8));
-            String result = Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP) + "." + Base64.encodeToString(encrypted, Base64.NO_WRAP);
-            JSObject response = new JSObject(); response.put("value", result); call.resolve(response);
+            JSObject response = new JSObject(); response.put("value", sealValue(value)); call.resolve(response);
         } catch (Exception error) {call.reject("Device encryption failed", error);}
     }
     @PluginMethod
@@ -47,12 +59,7 @@ public class DeviceVaultPlugin extends Plugin {
         try {
             String value = call.getString("value");
             if (value == null) {call.reject("Missing vault data"); return;}
-            String[] parts = value.split("\\.", 2);
-            if (parts.length != 2) {call.reject("Invalid encrypted device data"); return;}
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.DECRYPT_MODE, getKey(false), new GCMParameterSpec(128, Base64.decode(parts[0], Base64.NO_WRAP)));
-            String result = new String(cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)), StandardCharsets.UTF_8);
-            JSObject response = new JSObject(); response.put("value", result); call.resolve(response);
+            JSObject response = new JSObject(); response.put("value", openValue(value)); call.resolve(response);
         } catch (Exception error) {call.reject("This vault could not be opened on this device", error);}
     }
 }

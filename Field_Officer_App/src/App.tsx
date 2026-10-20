@@ -636,8 +636,7 @@ export function App() {
       await fetch(`${base}/api/auth`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify({action: 'logout'})}).catch(() => {});
     }
     clearSession();
-    // Signing out of the register also clears the device PIN: the next officer
-    // sets their own, and the previous officer's cached records stay closed.
+    // Keep the device vault and PIN so signing out cannot expose or discard unsent evidence.
     await flushPrivateStorage();
     await lockPrivateStorage();
     setLocked(true);

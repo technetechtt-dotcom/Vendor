@@ -1,3 +1,4 @@
+import {readJsonObject} from '../../../lib/request';
 import {database, noticeWebhook} from '../../../lib/server';
 import {passwordPending, sessionUser} from '../../../lib/accounts';
 import {fieldCorsHeaders, withFieldCors, mutationOriginError} from '../../../lib/cors';
@@ -74,7 +75,7 @@ async function handlePost(req: Request) {
   const account = await viewer(req);
   if (account instanceof Response) return account;
   if (!can(account.role, 'compliance.write')) return json({error: 'Your role cannot change notice delivery or compliance cases.'}, 403);
-  const body: Record<string, unknown> = await req.json();
+  const body = await readJsonObject(req);
   const eventId = String(body.eventId || '');
   const found = await noticeCase(database(), eventId);
   if (!found) return json({error: 'Notice not found.'}, 404);

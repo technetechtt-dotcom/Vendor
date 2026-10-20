@@ -1,3 +1,4 @@
+import {readJsonObject} from '../../../lib/request';
 import {database, bootstrapToken} from '../../../lib/server';
 import {checkPassword, clearOtherSessions, clearSessions, clientIp, hashPassword, isLocalHost, openSession, passwordPending, publicAccount, requestIsSecure, sessionCookie, sessionToken, sessionUser} from '../../../lib/accounts';
 import {fieldCorsHeaders, withFieldCors, mutationOriginError} from '../../../lib/cors';
@@ -104,7 +105,7 @@ async function handlePost(req: Request) {
   }
   let body: Record<string, unknown>;
   try {
-    body = await req.json();
+    body = await readJsonObject(req);
   } catch {
     return json({error: 'Sign-in details could not be read. Try again.'}, 400);
   }

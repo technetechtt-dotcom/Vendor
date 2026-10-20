@@ -196,10 +196,15 @@ export function saveSession(token: string, user: FieldAccount) {
   return writeProtected(token, user);
 }
 
-export function clearSession() {
-  memoryToken = '';
-  memoryUser = null;
-  return privateStorageReady() ? writeProtected('', null) : Promise.resolve();
+export async function clearSession() {
+  memoryToken = ''; memoryUser = null;
+  if (privateStorageReady()) await writeProtected('', null);
+  else {
+    const preferences = await nativePreferences();
+    if (preferences) {await preferences.remove({key: TOKEN_KEY}); await preferences.remove({key: USER_KEY});}
+    localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(USER_KEY);
+    sessionStorage.removeItem(TOKEN_KEY); sessionStorage.removeItem(USER_KEY);
+  }
 }
 
 export function authHeaders(json = false): HeadersInit {
