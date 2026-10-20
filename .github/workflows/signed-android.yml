@@ -1,0 +1,45 @@
+name: Prepare signed Android artifact
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  signed-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: Field_Officer_App
+    env:
+      LED_KEYSTORE_PASSWORD: ${{ secrets.LED_KEYSTORE_PASSWORD }}
+      LED_KEY_ALIAS: ${{ secrets.LED_KEY_ALIAS }}
+      LED_KEY_PASSWORD: ${{ secrets.LED_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: Field_Officer_App/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Restore the existing municipal signing key
+        env:
+          SIGNING_KEY: ${{ secrets.LED_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$SIGNING_KEY" || { echo 'Configure the existing municipal signing key in repository secrets.'; exit 1; }
+          test -n "$LED_KEYSTORE_PASSWORD" && test -n "$LED_KEY_ALIAS" && test -n "$LED_KEY_PASSWORD"
+          printf '%s' "$SIGNING_KEY" | base64 --decode > "$RUNNER_TEMP/led-release.keystore"
+          echo "LED_KEYSTORE=$RUNNER_TEMP/led-release.keystore" >> "$GITHUB_ENV"
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run apk:release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-signed-field-release
+          path: |
+            Field_Officer_App/releases/*.apk
+            Field_Officer_App/releases/*.json
+          retention-days: 7
