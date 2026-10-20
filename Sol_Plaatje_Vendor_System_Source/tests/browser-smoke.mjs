@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import {mkdir} from 'node:fs/promises';
+import {mkdir, writeFile} from 'node:fs/promises';
+import AxeBuilder from '@axe-core/playwright';
 import {chromium} from 'playwright';
 import {runScenarios} from './scenarios.mjs';
 
@@ -19,18 +20,25 @@ const browser = await chromium.launch({headless: true});
 const context = await browser.newContext({viewport: {width: 1440, height: 1000}});
 const page = await context.newPage();
 const errors = [];
+const accessibility = [];
+async function audit(screen, target = page) {
+  const result = await new AxeBuilder({page: target}).withTags(['wcag2a','wcag2aa','wcag21aa']).analyze();
+  for (const violation of result.violations) accessibility.push({screen,id:violation.id,impact:violation.impact,nodes:violation.nodes.map(node => ({target:node.target,summary:node.failureSummary,html:node.html}))});
+}
 let field;
 page.on('pageerror', error => errors.push(error.message));
 await context.addCookies([{name: 'led_session', value: scenario.ownerToken, url: base, httpOnly: true}]);
 try {
   await page.goto(base);
   await page.getByRole('heading', {name: 'A clear view of your trading community.'}).waitFor();
+  await audit('Overview');
   await page.screenshot({path: 'test-results/01-office-overview.png', fullPage: true});
   const workspaces = ['Vendor register', 'Business hubs', 'Trading locations', 'Fees & payments', 'Compliance', 'Users', 'Follow-ups', 'Unit inventory', 'Permits & cards', 'Tariffs & reconciliation', 'Reports', 'Notice queue', 'Audit', 'Settings', 'Import', 'Backup', 'Sessions'];
   for (const name of workspaces) {
     await page.getByRole('button', {name, exact: true}).click();
     await page.getByRole('heading', {name, exact: true, level: 1}).waitFor();
     assert.equal(await page.getByRole('main').count(), 1);
+    await audit(name);
   }
   await page.getByRole('button', {name: 'Vendor register', exact: true}).click();
   await page.getByRole('button', {name: /Open Synthetic Test Business/}).click();
@@ -38,13 +46,16 @@ try {
     await page.getByRole('tab', {name, exact: true}).click();
     assert.equal(await page.getByRole('tab', {name, exact: true}).getAttribute('aria-selected'), 'true');
   }
+  await audit('Vendor profile');
   await page.screenshot({path: 'test-results/02-vendor-profile.png', fullPage: true});
   await page.getByRole('button', {name: 'Close profile', exact: true}).click();
   await page.setViewportSize({width: 390, height: 844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, 'Mobile page overflows horizontally');
+  await audit('Mobile register');
   await page.screenshot({path: 'test-results/03-office-mobile.png', fullPage: true});
   await page.getByRole('button', {name: 'Register vendor', exact: true}).click();
   await page.getByRole('dialog', {name: 'Vendor registration'}).waitFor();
+  await audit('Mobile registration');
   await page.screenshot({path: 'test-results/04-registration-mobile.png', fullPage: true});
   await page.getByRole('button', {name: 'Close registration', exact: true}).click();
   await page.goto(base + '/not-a-real-page');
@@ -65,6 +76,7 @@ try {
   await field.getByLabel('Vendor ID', {exact: true}).fill(scenario.vendorId);
   await field.getByRole('button', {name: 'Find vendor', exact: true}).click();
   await field.getByRole('heading', {name: 'Synthetic Test Business', exact: true}).waitFor();
+  await audit('Field profile', field);
   await field.screenshot({path: 'test-results/05-field-profile.png', fullPage: true});
   const encrypted = await field.evaluate(() => localStorage.getItem('solplaatje.field.encryptedVault'));
   assert.ok(encrypted && !encrypted.includes('Synthetic Test Business'), 'Vendor record is not encrypted');
@@ -75,6 +87,8 @@ try {
   await field.getByRole('button', {name: 'Unlock', exact: true}).click();
   await field.getByLabel('Vendor ID', {exact: true}).waitFor();
   assert.deepEqual(errors, [], 'Client runtime errors were raised');
+  await writeFile('test-results/accessibility.json', JSON.stringify(accessibility,null,2));
+  assert.equal(accessibility.length, 0, 'Accessibility violations: ' + JSON.stringify(accessibility.map(row=>({screen:row.screen,id:row.id,targets:row.nodes.slice(0,3).map(node=>node.target)}))));
   console.log(JSON.stringify({ok: true, workspaces: 18, profileTabs: 4, field: ['PIN creation', 'sign-in', 'lookup', 'encrypted cache', 'reload lock', 'unlock'], apiChecks: scenario.checks}, null, 2));
 } catch (error) {
   await page.screenshot({path: 'test-results/failure-office.png', fullPage: true}).catch(() => {});
