@@ -1,8 +1,8 @@
-import {database} from '../../../lib/server';
+import {database, bootstrapToken} from '../../../lib/server';
 import {checkPassword, clearOtherSessions, clearSessions, clientIp, ensureAccounts, hashPassword, isLocalHost, openSession, passwordPending, publicAccount, requestIsSecure, sessionCookie, sessionToken, sessionUser} from '../../../lib/accounts';
-import {fieldCorsHeaders, withFieldCors} from '../../../lib/cors';
+import {fieldCorsHeaders, withFieldCors, mutationOriginError} from '../../../lib/cors';
 
-const roles = ['superuser', 'office', 'field'];
+const roles = ['superuser', 'office', 'finance', 'field'];
 const WINDOW_MS = 15 * 60 * 1000;
 
 function json(body: unknown, status = 200, extra?: HeadersInit) {
@@ -13,6 +13,17 @@ function json(body: unknown, status = 200, extra?: HeadersInit) {
 
 function deviceLabel(req: Request) {
   return (req.headers.get('user-agent') || 'Unknown device').slice(0, 160);
+}
+
+function friendlyDevice(value: string) {
+  const platform = /iPhone/i.test(value) ? 'iPhone' : /iPad/i.test(value) ? 'iPad' : /Android/i.test(value) ? 'Android device' : /Windows/i.test(value) ? 'Windows computer' : /Macintosh|Mac OS/i.test(value) ? 'Mac' : /Linux/i.test(value) ? 'Linux computer' : 'Unknown device';
+  const browser = /Edg\//i.test(value) ? 'Microsoft Edge' : /CriOS|Chrome\//i.test(value) ? 'Google Chrome' : /Firefox\//i.test(value) ? 'Firefox' : /Safari\//i.test(value) ? 'Safari' : /wv\)/i.test(value) ? 'App web view' : '';
+  return browser ? `${platform} · ${browser}` : platform;
+}
+
+async function publicSessionId(token: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+  return [...new Uint8Array(digest)].slice(0, 12).map(byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function secureCookie(req: Request, token: string, maxAge: number) {
@@ -52,13 +63,20 @@ async function handleGet(req: Request) {
   const db = database();
   await ensureAccounts(db);
   const account = await sessionUser(db, req);
-  if (!account) return json({user: null, setupRequired: await setupRequired(db)});
+  if (!account) return json({user: null, setupRequired: await setupRequired(db), setupTokenRequired: !isLocalHost(new URL(req.url).hostname)});
   return json({user: publicAccount(account)});
 }
 
 async function handleSetup(req: Request, db: ReturnType<typeof database>, body: any) {
+  const rejected = mutationOriginError(req);
+  if (rejected) return rejected;
   if (cleartextBlocked(req)) return json({error: 'Administrator setup requires a secure https connection.'}, 400);
   if (!(await setupRequired(db))) return json({error: 'An administrator already exists. Sign in instead.'}, 409);
+  if (!isLocalHost(new URL(req.url).hostname)) {
+    const expected = bootstrapToken();
+    if (expected.length < 32) return json({error: 'The system owner must configure a BOOTSTRAP_TOKEN of at least 32 characters before administrator setup.'}, 503);
+    if (typeof body.setupToken !== 'string' || body.setupToken !== expected) return json({error: 'The administrator setup token is not correct.'}, 403);
+  }
   const name = String(body.name || '').trim().replace(/\s+/g, ' ');
   const email = String(body.email || '').trim().toLowerCase();
   const password = String(body.password || '');
@@ -110,6 +128,8 @@ async function handlePost(req: Request) {
     const account = {id: row.id, name: row.name, email: row.email, role: row.role, active: row.active, mustChangePassword: row.mustChangePassword};
     return json({user: publicAccount(account), token: session.token}, 200, {'Set-Cookie': secureCookie(req, session.token, session.maxAge)});
   }
+  const rejected = mutationOriginError(req, true);
+  if (rejected) return rejected;
   const account = await sessionUser(db, req);
   if (!account) return json({error: 'Sign in required.'}, 401);
   if (body.action === 'logout') {
@@ -134,7 +154,18 @@ async function handlePost(req: Request) {
     const userId = account.role === 'superuser' ? String(body.userId || account.id) : account.id;
     const rows = await db.prepare('SELECT token,created_at AS createdAt,expires_at AS expiresAt,device FROM sessions WHERE user_id=? AND expires_at>? ORDER BY created_at DESC').bind(userId, new Date().toISOString()).all<any>();
     const current = sessionToken(req);
-    return json({sessions: rows.results.map(row => ({createdAt: row.createdAt, expiresAt: row.expiresAt, device: row.device || 'Unknown device', current: row.token === current}))});
+    return json({sessions: await Promise.all(rows.results.map(async row => ({id: await publicSessionId(row.token), createdAt: row.createdAt, expiresAt: row.expiresAt, device: friendlyDevice(row.device || ''), current: row.token === current})))});
+  }
+  if (body.action === 'revoke-session') {
+    const target = account.role === 'superuser' ? String(body.userId || account.id) : account.id;
+    const requested = String(body.sessionId || '');
+    const rows = await db.prepare('SELECT token FROM sessions WHERE user_id=?').bind(target).all<{token: string}>();
+    let token = '';
+    for (const row of rows.results) if (await publicSessionId(row.token) === requested) { token = row.token; break; }
+    if (!token) return json({error: 'That device session is no longer active.'}, 404);
+    if (token === sessionToken(req)) return json({error: 'Use Sign out to end the session on this device.'}, 400);
+    await db.prepare('DELETE FROM sessions WHERE token=? AND user_id=?').bind(token, target).run();
+    return json({ok: true});
   }
   if (body.action === 'revoke-sessions') {
     const target = String(body.userId || account.id);

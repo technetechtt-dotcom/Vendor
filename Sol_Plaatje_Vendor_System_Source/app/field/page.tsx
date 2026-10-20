@@ -1,11 +1,14 @@
+import Link from 'next/link';
+import {FIELD_APP_ASSET_PATH, FIELD_APP_FILE, FIELD_APP_VERSION} from '../../lib/field-app';
+
 export default function FieldHelp() {
   return (
     <main className="field-moved">
       <p className="eyebrow">LED FIELD VISITS</p>
       <h1>Install the field visits app</h1>
-      <p>Site visits, card scans and notices are recorded in the Android app, version 1.0.0. The office register stays on this website.</p>
-      <p><a className="primary" href="/field-app">Download LED-Field-Visits-1.0.0.apk</a></p>
-      <p className="hint">The download endpoint serves a signed, versioned release when that file is published under Field_Officer_App/releases/. If the package is not on this server yet, the link explains how to build and place it. Do not treat an unsigned local copy as the production release.</p>
+      <p>Site visits, card scans and notices are recorded in the Android app, version {FIELD_APP_VERSION}. The office register stays on this website.</p>
+      <p><a className="primary" href={FIELD_APP_ASSET_PATH} download>Download {FIELD_APP_FILE}</a></p>
+      <p className="hint">Use only a package approved and signed by the LED office. Ask your administrator if installation is blocked or the download is unavailable.</p>
       <h2>Setup</h2>
       <ul>
         <li>Install the versioned APK from the download link above, or the copy the LED office provides.</li>
@@ -17,7 +20,7 @@ export default function FieldHelp() {
       <ul>
         <li>Draft visits, the send queue, cached vendor profiles and GPS findings stay on that phone in local storage for the signed-in official and register address.</li>
         <li>They are not the municipal register. Keep the phone locked.</li>
-        <li>If the device is lost, sign out other devices from the office Sessions workspace, then use Offline recovery → Clear phone data on a replacement handset after signing in.</li>
+        <li>If a phone is lost, sign out its session from the office Sessions workspace and ask your device administrator to lock or erase that phone. Clearing a replacement phone does not erase the lost phone.</li>
         <li>Rejected visits stay until a corrected submission succeeds or an official dismisses them. Offline recovery remains available to review history even when nothing is waiting.</li>
       </ul>
       <h2>If something does not work</h2>
@@ -28,7 +31,7 @@ export default function FieldHelp() {
         <li>Map link fails: the coordinates remain on the visit record in the office.</li>
         <li>A document or PDF that does not open needs a signed-in session. Use Download or share PDF, then the Android share sheet.</li>
       </ul>
-      <a className="primary" href="/">Back to the vendor register</a>
+      <Link className="primary" href="/">Back to the vendor register</Link>
     </main>
   );
 }

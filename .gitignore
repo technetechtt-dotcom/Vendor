@@ -1,1 +1,9 @@
 *.apk
+*.tsbuildinfo
+**/.dev.vars*
+**/keystore.properties
+**/*.keystore
+**/*.jks
+/audit-report/*.png
+/Sol_Plaatje_Vendor_System_Source/check_db*.sql
+/Sol_Plaatje_Vendor_System_Source/undefined.dirs.txt

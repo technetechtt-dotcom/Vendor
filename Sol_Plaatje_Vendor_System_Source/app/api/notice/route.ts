@@ -1,9 +1,10 @@
 import {database, noticeWebhook} from '../../../lib/server';
 import {ensureAccounts, passwordPending, sessionUser} from '../../../lib/accounts';
-import {fieldCorsHeaders, withFieldCors} from '../../../lib/cors';
+import {fieldCorsHeaders, withFieldCors, mutationOriginError} from '../../../lib/cors';
 import {noticePdf, noticeText, noticeVendor} from '../../../lib/notices';
 import {submissionKey} from '../../../lib/submissions';
 import {Vendor, Entry} from '../../../lib/data';
+import {can} from '../../../lib/capabilities';
 
 const handovers = ['draft', 'handover', 'acknowledged'];
 
@@ -69,8 +70,11 @@ async function handleGet(req: Request) {
 }
 
 async function handlePost(req: Request) {
+  const rejected = mutationOriginError(req, true);
+  if (rejected) return rejected;
   const account = await viewer(req);
   if (account instanceof Response) return account;
+  if (!can(account.role, 'compliance.write')) return json({error: 'Your role cannot change notice delivery or compliance cases.'}, 403);
   const body: any = await req.json();
   const eventId = String(body.eventId || '');
   const found = await noticeCase(database(), eventId);

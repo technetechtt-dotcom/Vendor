@@ -2,17 +2,17 @@
 import {useEffect, useState} from 'react';
 import {Building2, Check, Loader2} from 'lucide-react';
 
-export type Account = {id: string; name: string; email: string; role: 'superuser' | 'office' | 'field'; mustChangePassword?: boolean};
+export type Account = {id: string; name: string; email: string; role: 'superuser' | 'office' | 'finance' | 'field'; mustChangePassword?: boolean};
 type OrgUser = Account & {active: number; mustChangePassword?: number};
 
-const roleLabel = (role: string) => role === 'superuser' ? 'Super user' : role === 'field' ? 'Field officer' : 'Office user';
+const roleLabel = (role: string) => role === 'superuser' ? 'Super user' : role === 'finance' ? 'Finance officer' : role === 'field' ? 'Field officer' : 'Registration / compliance';
 
 function fieldValue(form: HTMLFormElement, name: string) {
   const field = form.elements.namedItem(name);
   return field && 'value' in field ? String(field.value) : '';
 }
 
-export function LoginScreen({onSuccess, setupRequired = false}: {onSuccess: (user: Account) => void; setupRequired?: boolean}) {
+export function LoginScreen({onSuccess, setupRequired = false, setupTokenRequired = false}: {onSuccess: (user: Account) => void; setupRequired?: boolean; setupTokenRequired?: boolean}) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   return (
@@ -29,11 +29,12 @@ export function LoginScreen({onSuccess, setupRequired = false}: {onSuccess: (use
           const email = fieldValue(form, 'email').trim();
           const password = fieldValue(form, 'password');
           const confirm = fieldValue(form, 'confirm');
+          const setupToken = fieldValue(form, 'setupToken');
           setBusy(true);
           setError('');
           try {
             if (setupRequired && password !== confirm) throw new Error('Enter the same password twice.');
-            const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(setupRequired ? {action: 'setup', name, email, password} : {action: 'login', email, password})});
+            const response = await fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(setupRequired ? {action: 'setup', name, email, password, setupToken} : {action: 'login', email, password})});
             const body: any = await response.json();
             if (!response.ok) throw new Error(body.error || 'Sign-in failed');
             onSuccess(body.user);
@@ -45,6 +46,7 @@ export function LoginScreen({onSuccess, setupRequired = false}: {onSuccess: (use
         }}>
           {error && <div className="field-alert" role="alert">{error}</div>}
           {setupRequired && <label>Full name<input name="name" autoComplete="name" required /></label>}
+          {setupRequired && setupTokenRequired && <label>Administrator setup token<input name="setupToken" type="password" autoComplete="off" required minLength={32} /><small>Use the one-time setup token supplied by the system owner.</small></label>}
           <label>Email address<input name="email" type="email" autoComplete="username" required /></label>
           <label>Password<input name="password" type="password" autoComplete={setupRequired ? 'new-password' : 'current-password'} required minLength={setupRequired ? 12 : 8} /></label>
           {setupRequired && <label>Confirm password<input name="confirm" type="password" autoComplete="new-password" required minLength={12} /></label>}
@@ -112,7 +114,16 @@ export function UsersScreen() {
     if (!response.ok) throw new Error(body.error || 'Could not load users');
     setUsers(body.users);
   }
-  useEffect(() => { load().catch(cause => setError(cause instanceof Error ? cause.message : 'Could not load users')); }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'users'}), signal: controller.signal})
+      .then(async response => {
+        const body: {users: OrgUser[]; error?: string} = await response.json();
+        if (!response.ok) throw new Error(body.error || 'Could not load users');
+        if (!controller.signal.aborted) setUsers(body.users);
+      }).catch(cause => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load users'); });
+    return () => controller.abort();
+  }, []);
   return (
     <section className="panel">
       <div className="panel-head"><div><h2>Organisation users</h2><p>Super user access, office staff and field officers</p></div></div>
@@ -139,7 +150,7 @@ export function UsersScreen() {
         <div className="form-grid">
           <label>Full name<input value={draft.name} onChange={event => setDraft({...draft, name: event.target.value})} required /></label>
           <label>Email address<input type="email" value={draft.email} onChange={event => setDraft({...draft, email: event.target.value})} required /></label>
-          <label>Role<select value={draft.role} onChange={event => setDraft({...draft, role: event.target.value})}><option value="office">Office user</option><option value="field">Field officer</option><option value="superuser">Super user</option></select></label>
+          <label>Role<select value={draft.role} onChange={event => setDraft({...draft, role: event.target.value})}><option value="office">Registration / compliance</option><option value="finance">Finance officer</option><option value="field">Field officer</option><option value="superuser">Super user</option></select></label>
           <label>{draft.id ? 'New password (optional)' : 'Temporary password'}<input type="password" autoComplete="new-password" value={draft.password} onChange={event => setDraft({...draft, password: event.target.value})} required={!draft.id} minLength={draft.password ? 8 : undefined} /></label>
         </div>
         <label className="check-line"><input type="checkbox" checked={draft.active} onChange={event => setDraft({...draft, active: event.target.checked})} />Account can sign in</label>

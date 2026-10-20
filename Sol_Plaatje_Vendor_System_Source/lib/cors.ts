@@ -9,6 +9,16 @@ export function isFieldAppOrigin(origin: string | null) {
   }
 }
 
+/** Cookie sessions may mutate only from this site. Native clients use bearer tokens. */
+export function mutationOriginError(req: Request, allowField = false): Response | null {
+  const origin = req.headers.get('origin');
+  const sameOrigin = origin === new URL(req.url).origin;
+  const bearer = /^Bearer\s+\S+$/i.test(req.headers.get('authorization') || '');
+  if (sameOrigin || (!origin && (bearer || req.headers.get('sec-fetch-site') !== 'cross-site'))) return null;
+  if (allowField && isFieldAppOrigin(origin) && bearer) return null;
+  return Response.json({error: 'Invalid request origin.'}, {status: 403, headers: {'Cache-Control': 'no-store'}});
+}
+
 export function fieldCorsHeaders(req: Request): Record<string, string> | null {
   const origin = req.headers.get('origin');
   if (!isFieldAppOrigin(origin)) return null;

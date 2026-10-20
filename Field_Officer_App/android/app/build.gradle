@@ -16,10 +16,36 @@ android {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            // A release build must be signed with the municipality's own key.
+            // Set these in android/keystore.properties (never commit it) or as
+            // LED_KEYSTORE, LED_KEYSTORE_PASSWORD, LED_KEY_ALIAS, LED_KEY_PASSWORD.
+            def keystorePropsFile = rootProject.file('keystore.properties')
+            def keystoreProps = new Properties()
+            if (keystorePropsFile.exists()) {
+                keystoreProps.load(new FileInputStream(keystorePropsFile))
+            }
+            def keystoreFile = System.getenv('LED_KEYSTORE') ?: keystoreProps['storeFile']
+            def keystorePassword = System.getenv('LED_KEYSTORE_PASSWORD') ?: keystoreProps['storePassword']
+            def keyAliasValue = System.getenv('LED_KEY_ALIAS') ?: keystoreProps['keyAlias']
+            def keyPasswordValue = System.getenv('LED_KEY_PASSWORD') ?: keystoreProps['keyPassword']
+            if (keystoreFile) {
+                storeFile file(keystoreFile)
+                storePassword keystorePassword
+                keyAlias keyAliasValue
+                keyPassword keyPasswordValue
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // Without a keystore this stays unsigned and the build says so.
+            if (System.getenv('LED_KEYSTORE') || rootProject.file('keystore.properties').exists()) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }

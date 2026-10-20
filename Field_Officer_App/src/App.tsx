@@ -1,6 +1,6 @@
 import {useEffect, useRef, useState} from 'react';
 import {ScanLine, Search, X, MapPin, ShieldCheck, Wallet, ChevronLeft, Camera, Check, LocateFixed, Wifi, Building2, ClipboardCheck, Loader2, Mail, LogOut} from 'lucide-react';
-import {Vendor, Entry, Delivery, money, balance, permit, decideCard, getRegisterBase, saveRegisterBase, getToken, getSession, saveSession, clearSession, authHeaders, noticeEmail, noticeText, hydrateSession, openProtected, FieldAccount} from './register';
+import {Vendor, Entry, Delivery, money, balance, permit, decideCard, getRegisterBase, saveRegisterBase, getToken, getSession, saveSession, clearSession, authHeaders, noticeEmail, noticeText, hydrateSession, openProtected, SessionExpiredError, hasPin, setPin, unlockWithPin, clearPin, resetPhone, FieldAccount} from './register';
 
 type VisitGPS = {lat: number; lng: number; accuracy: number};
 type QueueItem = {officialId: string; registerBase: string; payload: any; state: 'waiting' | 'rejected'; error: string};
@@ -42,6 +42,12 @@ export function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [recovery, setRecovery] = useState(false);
   const [cardWarning, setCardWarning] = useState('');
+  const [pinReady, setPinReady] = useState(false);
+  const [locked, setLocked] = useState(false);
+  const [pinDraft, setPinDraft] = useState('');
+  const [pinConfirm, setPinConfirm] = useState('');
+  const [pinError, setPinError] = useState('');
+  const [recordStale, setRecordStale] = useState('');
   const activeVendor = useRef('');
   const noticeLock = useRef('');
   const syncLock = useRef(false);
@@ -231,6 +237,7 @@ export function App() {
   async function lookup(raw: string) {
     setError('');
     setNotice('');
+    setRecordStale('');
     const base = requireServer();
     if (!base) return;
     let value = raw.trim();
@@ -293,12 +300,14 @@ export function App() {
           else restoreDraft(cached.vendor.id);
           const warn = (!verdict.valid || ['revoked', 'replaced', 'unrecognised', 'missing-serial'].includes(verdict.outcome)) ? verdict.message : '';
           setCardWarning(warn);
-          setNotice('Showing the copy saved on this phone' + (cached.savedAt ? ' on ' + date(cached.savedAt) : '') + '. Card validity uses that saved card history.');
+          setRecordStale('Offline copy saved on this phone' + (cached.savedAt ? ' on ' + date(cached.savedAt) : '') + '. Card validity uses that saved card history. Do not treat this copy as the current register record.');
+          setNotice('');
           return;
         }
       }
       setVendor(null);
       setCardWarning('');
+      setRecordStale('');
       if (correcting.current) correcting.current = null;
       setError(cause instanceof Error ? cause.message : 'Could not load the vendor. Check the register address and your connection.');
     } finally {
@@ -520,11 +529,56 @@ export function App() {
           } else setSession(null);
         }
       } finally {
-        if (!cancelled) setAuthReady(true);
+        if (cancelled) return;
+        // Records and evidence on this phone stay behind the device PIN.
+        if (hasPin()) {
+          setLocked(true);
+          setAuthReady(false);
+        } else {
+          setPinReady(false);
+          setAuthReady(true);
+        }
       }
     })();
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    const onHidden = () => { if (document.visibilityState === 'hidden' && hasPin()) setLocked(true); };
+    document.addEventListener('visibilitychange', onHidden);
+    return () => document.removeEventListener('visibilitychange', onHidden);
+  }, []);
+
+  async function unlock(event: React.FormEvent) {
+    event.preventDefault();
+    setPinError('');
+    try {
+    if (await unlockWithPin(pinDraft)) {
+      setLocked(false);
+      setPinDraft('');
+      setAuthReady(true);
+      setPinReady(true);
+    } else {
+      setPinError('That PIN is not correct.');
+      setPinDraft('');
+    }
+    } catch (cause) { setPinError(cause instanceof Error ? cause.message : 'Could not unlock this phone.'); }
+  }
+
+  async function createPin(event: React.FormEvent) {
+    event.preventDefault();
+    setPinError('');
+    if (pinDraft !== pinConfirm) { setPinError('Enter the same PIN twice.'); return; }
+    try {
+      await setPin(pinDraft);
+      setPinDraft('');
+      setPinConfirm('');
+      setPinReady(true);
+      setNotice('Device PIN set. It is asked for every time this app is opened.');
+    } catch (cause) {
+      setPinError(cause instanceof Error ? cause.message : 'Choose a PIN of 4 to 8 digits.');
+    }
+  }
 
   async function signIn(event: React.FormEvent) {
     event.preventDefault();
@@ -565,8 +619,15 @@ export function App() {
       await fetch(`${base}/api/auth`, {method: 'POST', headers: authHeaders(true), body: JSON.stringify({action: 'logout'})}).catch(() => {});
     }
     clearSession();
+    // Signing out of the register also clears the device PIN: the next officer
+    // sets their own, and the previous officer's cached records stay closed.
+    clearPin();
     setSession(null);
     setVendor(null);
+    setRecordStale('');
+    setPinReady(false);
+    setPinDraft('');
+    setPinConfirm('');
     setNotice('');
   }
 
@@ -585,6 +646,55 @@ export function App() {
     })();
     return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
   }, [vendor?.id, vendor?.photo]);
+
+  if (locked) {
+    return (
+      <div className="field-app field-locked">
+        <main className="field-main">
+          <div className="field-intro">
+            <span className="field-scan-icon"><ShieldCheck size={34} /></span>
+            <p className="eyebrow">DEVICE LOCK</p>
+            <h1>Enter your PIN</h1>
+            <p>Cached vendor records and unsent visit evidence stay on this phone. The PIN locks access in this app. Keep the device screen lock enabled; offline records are not encrypted by this PIN.</p>
+          </div>
+          <form className="field-server" onSubmit={unlock}>
+            <label htmlFor="field-pin">PIN</label>
+            <input id="field-pin" type="password" inputMode="numeric" autoComplete="off" maxLength={8} value={pinDraft} onChange={event => setPinDraft(event.target.value)} required autoFocus />
+            <button type="submit" disabled={pinDraft.length < 4}>Unlock</button>
+          </form>
+          <button className="secondary field-wide" type="button" onClick={async () => { if (!window.confirm('Erase all saved sign-ins, drafts, queued visits and cached records on this phone? Unsent visits will be lost.')) return; try { await resetPhone(); window.location.reload(); } catch { setPinError('Phone data could not be fully cleared. Try again.'); } }}>Forgot the PIN — clear this phone</button>
+          {pinError && <div className="field-alert" role="alert">{pinError}</div>}
+          <p className="field-help">Clearing the phone removes the saved sign-in, drafts, the send queue and cached vendor records from this device.</p>
+        </main>
+        <footer className="field-footer">Sol Plaatje Municipality · Local Economic Development</footer>
+      </div>
+    );
+  }
+
+  if (!pinReady) {
+    return (
+      <div className="field-app field-locked">
+        <main className="field-main">
+          <div className="field-intro">
+            <span className="field-scan-icon"><ShieldCheck size={34} /></span>
+            <p className="eyebrow">PROTECT THIS PHONE</p>
+            <h1>Choose a device PIN</h1>
+            <p>This app keeps vendor records and offline visit evidence on the phone. A PIN is asked for every time the app is opened.</p>
+          </div>
+          <form className="field-server" onSubmit={createPin}>
+            <label htmlFor="new-pin">PIN (4 to 8 digits)</label>
+            <input id="new-pin" type="password" inputMode="numeric" autoComplete="off" maxLength={8} value={pinDraft} onChange={event => setPinDraft(event.target.value)} required />
+            <label htmlFor="confirm-pin">Confirm PIN</label>
+            <input id="confirm-pin" type="password" inputMode="numeric" autoComplete="off" maxLength={8} value={pinConfirm} onChange={event => setPinConfirm(event.target.value)} required />
+            <button type="submit" disabled={pinDraft.length < 4}>Set PIN and continue</button>
+          </form>
+          {pinError && <div className="field-alert" role="alert">{pinError}</div>}
+          <p className="field-help">A PIN protects this phone only. It is not your register password and it does not change what you may record.</p>
+        </main>
+        <footer className="field-footer">Sol Plaatje Municipality · Local Economic Development</footer>
+      </div>
+    );
+  }
 
   return (
     <div className="field-app">
@@ -652,7 +762,7 @@ export function App() {
             {waiting.map(item => <section className="field-sample" key={'wait-' + (item.payload?.idempotencyKey || '') + item.officialId}><strong>Waiting to send</strong><p>{item.payload?.vendorId} · {item.payload?.kind}</p><p>{String(item.payload?.note || '').split('\nVisit GPS')[0]}</p></section>)}
             {rejected.map(item => <section className="field-alert" key={'rej-' + (item.payload?.idempotencyKey || item.error) + item.officialId}><strong>Rejected</strong><p>{item.error || 'The register rejected this visit.'}</p><p>{item.payload?.vendorId} · {item.payload?.kind}</p><p>{String(item.payload?.note || '').split('\nVisit GPS')[0]}</p><button type="button" onClick={() => { correcting.current = {key: String(item.payload?.idempotencyKey || ''), payload: item.payload}; setRecovery(false); setNotice('Loading the vendor, then restoring the rejected visit for correction.'); void lookup(String(item.payload?.vendorId || '')); }}>Correct</button><button type="button" onClick={() => { pushHistory({action: 'dismissed', vendorId: item.payload?.vendorId || '', kind: item.payload?.kind || 'Visit', detail: item.error || 'Dismissed without sending.'}); writeQueue(mergeVisit(readQueue(), item.officialId, visitKeyOf(item), null)); }}>Dismiss</button></section>)}
             {held.map(item => <section className="field-sample" key={'held-' + (item.payload?.idempotencyKey || item.error)}><strong>Not assigned to this official</strong><p>{item.error || 'This visit is not tied to the signed-in official and was not sent.'}</p><button type="button" onClick={() => { pushHistory({action: 'dismissed', vendorId: item.payload?.vendorId || '', kind: item.payload?.kind || 'Visit', detail: 'Dismissed unassigned visit.'}); writeQueue(readQueue().filter(row => !( !row.officialId && row.payload?.idempotencyKey === item.payload?.idempotencyKey && row.error === item.error))); }}>Dismiss</button></section>)}
-            <section className="field-panel"><h2>Phone data on this device</h2><p className="muted">Drafts, the visit queue, cached vendor profiles and GPS findings stay in this browser’s local storage for the signed-in official and register address. They are not the municipal register. Keep the phone locked. If the device is lost, sign out other devices from the office register and use Clear phone data below on a replacement handset after signing in.</p><button className="secondary field-wide" type="button" onClick={() => { if (window.confirm('Clear drafts, queued visits, vendor cache and recovery history for this official on this phone?')) clearPhoneData(); }}>Clear phone data for this official</button></section>
+            <section className="field-panel"><h2>Phone data on this device</h2><p className="muted">Drafts, the visit queue, cached vendor profiles and GPS findings stay in this browser’s local storage for the signed-in official and register address. They are not the municipal register. Keep the phone locked. If the phone is lost, revoke its sign-in from the office register and ask your device administrator to lock or erase that phone. Clearing a replacement phone does not erase the lost phone.</p><button className="secondary field-wide" type="button" onClick={() => { if (window.confirm('Clear drafts, queued visits, vendor cache and recovery history for this official on this phone?')) clearPhoneData(); }}>Clear phone data for this official</button></section>
             <section className="field-panel"><h2>Dismissal and send history</h2>{history.map(item => <div className="field-entry" key={item.at + item.action + item.vendorId}><div><strong>{item.action}</strong><b>{item.kind}</b></div><p>{item.vendorId}</p><p>{item.detail}</p><small>{date(item.at)}</small></div>)}{!history.length && <p className="muted">No dismissals or successful queue sends yet.</p>}</section>
           </>
         ) : !vendor ? (
@@ -684,13 +794,14 @@ export function App() {
           </>
         ) : (
           <>
-            <button className="field-back" onClick={() => { stashDraft(vendor.id); activeVendor.current = ''; setVendor(null); setVisit(false); setNote(''); setDue(''); setGPS(null); visitKey.current = ''; setError(''); setNotice(''); }}><ChevronLeft size={17} />Scan another card</button>
-            <button className="secondary field-wide" type="button" onClick={() => { stashDraft(vendor.id); activeVendor.current = ''; setVendor(null); setVisit(false); openRecovery(); }}>Offline recovery</button>
+            <button className="field-back" onClick={() => { stashDraft(vendor.id); activeVendor.current = ''; setVendor(null); setVisit(false); setNote(''); setDue(''); setGPS(null); visitKey.current = ''; setError(''); setNotice(''); setRecordStale(''); }}><ChevronLeft size={17} />Scan another card</button>
+            <button className="secondary field-wide" type="button" onClick={() => { stashDraft(vendor.id); activeVendor.current = ''; setVendor(null); setVisit(false); setRecordStale(''); openRecovery(); }}>Offline recovery</button>
             <div className="field-vendor-head">
               {portrait ? <img src={portrait} alt={'Profile picture of ' + vendor.name} /> : <span>{vendor.name.split(' ').slice(0, 2).map(part => part[0]).join('')}</span>}
               <div><p className="mono">{vendor.id}</p><h1>{vendor.business}</h1><p>{vendor.name}</p></div>
             </div>
             {cardWarning && <div className="field-alert" role="alert"><strong>Card status</strong><p>{cardWarning}</p></div>}
+            {recordStale && <div className="field-sample" role="status"><strong>Offline copy</strong><p>{recordStale}</p></div>}
             {vendor.sample && <div className="field-sample">Sample vendor · not a municipal record or valid permit</div>}
             <div className="field-status-row">
               <span className={'badge ' + (permit(vendor) === 'Approved' ? 'good' : permit(vendor) === 'Pending review' ? 'amber' : 'bad')}>{permit(vendor)}</span>
@@ -718,7 +829,7 @@ export function App() {
                 {vendor.lat && vendor.lng && <a className="secondary field-wide" target="_blank" rel="noreferrer" href={`https://www.google.com/maps?q=${vendor.lat},${vendor.lng}`}><MapPin size={17} />Open registered location</a>}
                 <h3>Verification recorded by LED Office</h3>
                 {vendor.documents.length ? vendor.documents.map(item => <div className="field-check" key={item}><Check size={16} />{item}</div>) : <p className="muted">No verification items recorded.</p>}
-                {(vendor.files || []).length > 0 && <><h3>Uploaded documents</h3>{(vendor.files || []).map(file => <button type="button" className="secondary field-wide" key={file.id} onClick={async () => { try { await openProtected(file.url); } catch { setError('Could not open this document.'); } }}>{file.label}</button>)}</>}
+                {(vendor.files || []).length > 0 && <><h3>Uploaded documents</h3>{(vendor.files || []).map(file => <button type="button" className="secondary field-wide" key={file.id} onClick={async () => { try { await openProtected(file.url); } catch (cause) { if (cause instanceof SessionExpiredError) { clearSession(); setSession(null); setError(cause.message); } else { setError('Could not open this document.'); } } }}>{file.label}</button>)}</>}
               </section>
             )}
             {tab === 'Fees' && (
@@ -746,7 +857,7 @@ export function App() {
                       <>
                         <div className="notice-actions">
                           <a href={noticeEmail(vendor, entry)} onClick={() => postNotice(entry.id, 'deliver', {method: 'draft'})}><Mail size={16} />Email draft</a>
-                          <button type="button" disabled={noticeBusy === entry.id} onClick={async () => { setNoticeBusy(entry.id); try { await openProtected('/api/notice?eventId=' + encodeURIComponent(entry.id)); await refreshRecord(vendor.id); setNotice('PDF saved. Use the share sheet on Android, or the download on this browser. The download is recorded.'); } catch { setError('Could not save the notice.'); } finally { setNoticeBusy(''); } }}>Download or share PDF</button>
+                          <button type="button" disabled={noticeBusy === entry.id} onClick={async () => { setNoticeBusy(entry.id); try { await openProtected('/api/notice?eventId=' + encodeURIComponent(entry.id)); await refreshRecord(vendor.id); setNotice('PDF saved. Use the share sheet on Android, or the download on this browser. The download is recorded.'); } catch (cause) { if (cause instanceof SessionExpiredError) { clearSession(); setSession(null); setError(cause.message); } else { setError('Could not save the notice.'); } } finally { setNoticeBusy(''); } }}>Download or share PDF</button>
                           <button type="button" disabled={noticeBusy === entry.id} onClick={async () => { try { await navigator.clipboard.writeText(noticeText(vendor, entry)); setNotice('Notice copied. Paste it into your official email.'); } catch { setError('Copy unavailable. Use the email draft or PDF.'); } }}>Copy notice</button>
                           <button type="button" disabled={noticeBusy === entry.id} onClick={() => postNotice(entry.id, 'deliver', {method: 'handover'})}>Handed to trader</button>
                           <button type="button" disabled={noticeBusy === entry.id} onClick={() => postNotice(entry.id, 'deliver', {method: 'acknowledged'})}>Trader acknowledged</button>

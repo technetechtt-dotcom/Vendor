@@ -1,8 +1,9 @@
-node_modules
-dist
-android/.gradle
-android/app/build
-android/build
+node_modules/
+dist/
+.build-temp/
+android/.gradle/
+android/**/build/
 android/local.properties
-.idea
-*.apk
+android/keystore.properties
+*.jks
+*.keystore

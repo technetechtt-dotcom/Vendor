@@ -14,6 +14,63 @@ export type Entry = {
 const STORAGE_KEY = 'solplaatje.field.registerBase';
 const TOKEN_KEY = 'solplaatje.field.token';
 const USER_KEY = 'solplaatje.field.user';
+const PIN_KEY = 'solplaatje.field.pin';
+const PIN_ATTEMPTS_KEY = 'solplaatje.field.pinAttempts';
+
+/** Cached vendor records and offline evidence stay behind a device PIN. */
+export function hasPin() {
+  return Boolean(localStorage.getItem(PIN_KEY));
+}
+
+export function clearPin() {
+  localStorage.removeItem(PIN_KEY);
+  localStorage.removeItem(PIN_ATTEMPTS_KEY);
+}
+
+export async function resetPhone() {
+  for (const key of ['solplaatje.field.visitDrafts', 'solplaatje.field.visitQueue', 'solplaatje.field.vendorCache', 'solplaatje.field.visitHistory']) localStorage.removeItem(key);
+  await clearSession();
+  clearPin();
+}
+
+/** Verify a PIN and, on success, restore the stored session for this run. */
+export async function unlockWithPin(pin: string) {
+  if (!await verifyPin(pin)) return false;
+  await hydrateSession();
+  return true;
+}
+
+async function pinHash(pin: string, salt: string) {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(salt + ':' + pin));
+  return [...new Uint8Array(bytes)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export async function setPin(pin: string) {
+  const value = pin.trim();
+  if (!/^\d{4,8}$/.test(value)) throw new Error('Choose a PIN of 4 to 8 digits.');
+  const salt = crypto.randomUUID();
+  localStorage.setItem(PIN_KEY, JSON.stringify({salt, hash: await pinHash(value, salt)}));
+}
+
+export async function verifyPin(pin: string) {
+  let attempts: {failures: number; blockedUntil: number} = {failures: 0, blockedUntil: 0};
+  try { attempts = JSON.parse(localStorage.getItem(PIN_ATTEMPTS_KEY) || 'null') || attempts; } catch { /* use initial count */ }
+  if (attempts.blockedUntil > Date.now()) throw new Error(`Too many PIN attempts. Try again in ${Math.ceil((attempts.blockedUntil - Date.now()) / 1000)} seconds.`);
+  const raw = localStorage.getItem(PIN_KEY);
+  if (!raw) return false;
+  try {
+    const {salt, hash} = JSON.parse(raw) as {salt: string; hash: string};
+    const valid = (await pinHash(pin.trim(), salt)) === hash;
+    if (valid) localStorage.removeItem(PIN_ATTEMPTS_KEY);
+    else {
+      const failures = attempts.failures + 1;
+      localStorage.setItem(PIN_ATTEMPTS_KEY, JSON.stringify({failures, blockedUntil: failures >= 5 ? Date.now() + 60_000 : 0}));
+    }
+    return valid;
+  } catch {
+    return false;
+  }
+}
 
 export type FieldAccount = {id: string; name: string; email: string; role: string; mustChangePassword?: boolean};
 export type Delivery = {id: string; eventId: string; method: string; status: string; actor: string; createdAt: string};
@@ -147,7 +204,7 @@ export function saveSession(token: string, user: FieldAccount) {
 export function clearSession() {
   memoryToken = '';
   memoryUser = null;
-  void writeProtected('', null);
+  return writeProtected('', null);
 }
 
 export function authHeaders(json = false): HeadersInit {
@@ -158,9 +215,21 @@ export function authHeaders(json = false): HeadersInit {
   return headers;
 }
 
+/** Raised when the saved sign-in is no longer accepted, so the app can return to sign-in. */
+export class SessionExpiredError extends Error {
+  constructor(message = 'Your sign-in has expired. Sign in again to open this file.') {
+    super(message);
+    this.name = 'SessionExpiredError';
+  }
+}
+
 export async function openProtected(path: string) {
   const base = getRegisterBase();
   const response = await fetch(base + path, {cache: 'no-store', headers: authHeaders()});
+  if (response.status === 401 || response.status === 403) {
+    const body = await response.json().catch(() => ({} as {error?: string}));
+    throw new SessionExpiredError(body?.error || undefined);
+  }
   if (!response.ok) throw new Error('Could not open this file.');
   const blob = await response.blob();
   const filename = /filename="([^"]+)"/.exec(response.headers.get('Content-Disposition') || '')?.[1] || 'document';

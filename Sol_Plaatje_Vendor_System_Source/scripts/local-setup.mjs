@@ -12,6 +12,7 @@ const applied=existsSync(recordPath)?JSON.parse(readFileSync(recordPath,'utf8'))
 const oldMarker=path.join(localPersistPath,'cursor-initial-migration-applied');
 if(existsSync(oldMarker)&&!applied.includes('0000_easy_silhouette'))applied.push('0000_easy_silhouette');
 const files=readdirSync('drizzle').filter(name=>/^\d+.*\.sql$/.test(name)).sort();
+mkdirSync(localPersistPath,{recursive:true});
 let pending=false;
 for(const file of files){
  const tag=file.replace(/\.sql$/,'');
@@ -19,6 +20,8 @@ for(const file of files){
  pending=true;
  run(['--import','./scripts/sites-env.mjs','./node_modules/wrangler/bin/wrangler.js','d1','execute','DB','--local','--config','dist/server/wrangler.json','--persist-to',localPersistPath,'--file',path.join('drizzle',file)]);
  applied.push(tag);
+ // Persist each successful migration so a later failure can be retried safely.
+ writeFileSync(recordPath,JSON.stringify(applied,null,2)+'\n');
 }
 mkdirSync(localPersistPath,{recursive:true});
 writeFileSync(recordPath,JSON.stringify(applied,null,2)+'\n');
