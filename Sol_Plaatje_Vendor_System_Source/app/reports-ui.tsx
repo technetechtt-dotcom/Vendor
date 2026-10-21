@@ -102,7 +102,7 @@ export function Reports({vendors, entries, tariffs}: {vendors: Vendor[]; entries
           }),
         ], `overdue-charges-${today()}.csv`)}>Download overdue list</button>
       </div>
-      <div className="table-wrap"><table>
+      <div className="table-wrap stack"><table>
         <caption className="sr-only">Charges past their due date on accounts that still owe money</caption>
         <thead><tr><th scope="col" data-label="Vendor">Vendor</th><th scope="col" data-label="Location">Location</th><th scope="col" data-label="Charge due">Charge due</th><th scope="col" className="num" data-label="Balance now">Balance now</th><th scope="col" data-label="Permit">Permit</th></tr></thead>
         <tbody>{overdue.slice(0, 50).map(entry => {
