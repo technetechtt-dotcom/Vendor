@@ -170,3 +170,9 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px soli
   .field-intro h1{font-size:23px}
   .field-scan-icon{margin-bottom:12px}
 }
+
+.field-panel{min-width:0}
+.field-panel h2,.field-panel p,.field-location{overflow-wrap:anywhere}
+.field-balance strong{overflow-wrap:anywhere;font-size:clamp(26px,8vw,33px)}
+.field-entry>div{flex-wrap:wrap}
+.field-panel .field-panel{margin-top:8px}

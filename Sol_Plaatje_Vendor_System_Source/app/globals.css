@@ -185,3 +185,111 @@ tbody th{text-align:left;font-weight:600}
   .id-body .avatar{width:72px;height:96px}
   .id-body h3{font-size:18px}
 }
+
+/* ==========================================================================
+   Workspace cards: inventory, permits, tariffs, reports, audit, settings,
+   import, backup and sessions
+   ========================================================================== */
+
+.content>.panel,.content>form.panel{margin-bottom:22px;min-width:0}
+.panel-head{flex-wrap:wrap;align-items:flex-start}
+.panel-head>div{min-width:0;flex:1 1 220px}
+.panel-head .secondary,.panel-head .primary{flex-shrink:0}
+.fee-summary{grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr))}
+.fee-summary .panel{min-width:0}
+.fee-summary p{overflow-wrap:anywhere}
+.fee-summary strong{overflow-wrap:anywhere;font-size:clamp(22px,2.2vw,28px);line-height:1.25}
+
+.content>.panel>h2:first-child,.content>form.panel>h2:first-child{padding:22px 23px 8px}
+.content>.panel>h2:not(:first-child),.content>.panel>h3,.content>form.panel>h2:not(:first-child),.content>form.panel>h3{padding:16px 23px 8px}
+.content>.panel>p:not(.field-alert):not(.field-success),.content>.panel>.muted,.content>form.panel>p:not(.field-alert):not(.field-success),.content>form.panel>.muted{padding:0 23px 12px}
+.content>.panel>section,.content>form.panel>section{padding:4px 23px 12px}
+.content>.panel>ul.hint,.content>form.panel>ul.hint{margin:0 23px 16px;padding-left:18px}
+.content>.panel>.form-grid,.content>form.panel>.form-grid{padding:4px 23px 12px}
+.content>.panel>label,.content>form.panel>label{display:flex;flex-direction:column;gap:8px;padding:8px 23px 12px;font-size:13px}
+.content>.panel>label:first-child,.content>form.panel>label:first-child{padding-top:22px}
+.content>.panel>.form-grid input,.content>.panel>.form-grid select,.content>.panel>.form-grid textarea,.content>form.panel>.form-grid input,.content>form.panel>.form-grid select,.content>form.panel>.form-grid textarea,.content>form.panel>label textarea,.content>form.panel>label input{width:100%}
+.content>.panel>textarea,.content>form.panel>textarea{display:block;width:calc(100% - 46px);margin:0 23px 14px;min-height:148px}
+.content>.panel>.primary,.content>.panel>.secondary,.content>form.panel>.primary,.content>form.panel>.secondary{margin:4px 23px 20px}
+.content>.panel>.history,.content>.panel>.ledger,.content>form.panel>.history{padding-left:23px;padding-right:23px}
+.content>.panel>.history>div,.content>.panel>.ledger,.panel>.history>div{min-width:0}
+.history .mono,.ledger .mono,.ledger p,.ledger small{overflow-wrap:anywhere}
+.ledger .actions,.case-row .actions{flex-wrap:wrap;margin-top:10px}
+.case-row .actions .secondary,.case-row .actions a.secondary,.ledger .actions .secondary,.ledger .actions a.secondary{white-space:normal;text-align:center}
+.content>.panel .modal-foot,.content>form.panel .modal-foot{flex-wrap:wrap;justify-content:flex-start}
+.field-alert,.field-success{padding:12px 14px;border-radius:7px;font-size:14px;line-height:1.5}
+.content .field-alert,.content .field-success{margin:0 23px 16px}
+.user-form .field-alert,.user-form .field-success{margin:0 0 16px}
+.field-alert{background:#faece3;border:1px solid #e8cdbb;color:#7a452c}
+.field-success{background:#e8f2df;border:1px solid #d1e0c3;color:#36562d}
+.restore-confirmation{margin:0 23px 18px;padding:16px;border:1px solid #f0d3c8;border-radius:8px;background:#fff8f5;display:grid;gap:10px}
+.restore-confirmation input,.restore-confirmation button{width:100%}
+.panel details{margin:8px 0}
+.panel pre,.audit-diff{max-width:100%;overflow-x:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+.audit-diff{margin:10px 0 0;padding:0;list-style:none;display:grid;gap:6px}
+.audit-diff li{display:grid;gap:2px}
+.session-row{align-items:center}
+.session-row>div{min-width:0;flex:1}
+.session-row>button{margin-left:auto;flex-shrink:0}
+
+@media(max-width:680px){
+  .content>.panel .modal-foot .primary,.content>.panel .modal-foot .secondary,.content>.panel .modal-foot .file-button,.content>form.panel .modal-foot .primary,.content>form.panel .modal-foot .secondary,.content>form.panel .modal-foot .file-button{flex:1 1 100%}
+  .session-row{flex-wrap:wrap}
+  .session-row>button{margin-left:0;width:100%}
+  .case-row .actions,.ledger .actions{width:100%}
+  .fee-summary{grid-template-columns:1fr}
+}
+
+/* ==========================================================================
+   Every page: stat cards, hubs, locations, profile drawer, forms and modals
+   ========================================================================== */
+
+.page-heading{align-items:flex-start}
+.page-heading>div{min-width:0;flex:1}
+.page-heading h1,.subtitle,.demo-banner{overflow-wrap:anywhere}
+.page-heading .primary{flex-shrink:0}
+.stats,.overview-grid,.hub-grid,.location-grid{margin-bottom:22px}
+.stats{align-items:stretch}
+.stat,.fee-summary .panel,.hub-card,.overview-grid>.panel,.location-grid>.panel,.map-panel{min-width:0}
+.stat{height:100%}
+.stat>div{align-items:flex-start}
+.stat>strong{overflow-wrap:anywhere;font-size:clamp(22px,2.4vw,30px)}
+.stat>span{overflow-wrap:anywhere}
+.hub-grid,.location-grid,.overview-grid{align-items:stretch}
+.hub-card{display:flex;flex-direction:column}
+.hub-card h2,.hub-vendors button,.location-item strong,.location-item small,.coordinate,.attention-list strong,.attention-list small{overflow-wrap:anywhere}
+.hub-vendors{flex:1}
+.hub-vendors button,.location-item,.attention-list button{min-width:0}
+.hub-vendors button>span,.location-item>span,.attention-list button>span{min-width:0}
+.hub-totals,.hub-card-actions,.hub-toolbar,.profile-actions,.profile-tags,.map-details,.map-details .actions,.filters{flex-wrap:wrap}
+.hub-totals{gap:16px 28px}
+.location-item>span{flex:1}
+.map-details{align-items:flex-start}
+.filters select,.filters .search,.filters .secondary{min-width:0;max-width:100%}
+.table-wrap .actions{flex-wrap:wrap}
+.follow-up-case,.case-main,.case-row{min-width:0}
+.case-row input,.case-row select,.case-row textarea{width:100%;max-width:100%}
+.drawer,.modal,.form-modal,.event-modal{max-width:100%}
+.form-modal{width:min(720px,100%)}
+.modal-head>div,.profile-heading>div,.drawer-content{min-width:0}
+.modal-head h2,.modal-head p,.profile-heading h2,.profile-heading p,.profile-heading .mono{overflow-wrap:anywhere}
+.profile-heading{flex-wrap:wrap}
+.tabs{max-width:100%}
+.login-card>form{display:grid;gap:14px}
+.login-card .field-alert,.login-card .field-success{margin:0}
+
+@media(max-width:1100px){
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:800px){
+  .case-row .form-grid{grid-template-columns:1fr}
+  .overview-grid{grid-template-columns:1fr}
+}
+@media(max-width:680px){
+  .stats{grid-template-columns:1fr}
+  .profile-actions .primary,.profile-actions .secondary{flex:1 1 140px;justify-content:center}
+  .modal-foot{flex-wrap:wrap}
+  .page-heading .primary{width:100%;justify-content:center}
+  .hub-toolbar{justify-content:stretch}
+  .hub-toolbar .primary{width:100%;justify-content:center}
+}
