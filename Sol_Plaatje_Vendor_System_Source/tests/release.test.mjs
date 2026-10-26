@@ -10,7 +10,7 @@ import {runScenarios} from './scenarios.mjs';
 const moduleUrls = new Map();
 function moduleUrl(file) {
   if (file.pathname.endsWith('.json')) return 'data:text/javascript;base64,' + Buffer.from('export default ' + readFileSync(file, 'utf8')).toString('base64');
-  if (file.pathname.endsWith('/lib/server.ts')) return 'data:text/javascript;base64,' + Buffer.from(`export const database=()=>globalThis.__vendorTestEnvironment.db; export const bucket=()=>globalThis.__vendorTestEnvironment.store; export const bootstrapToken=()=>globalThis.__vendorTestEnvironment.bootstrap||''; export const noticeWebhook=()=>'';`).toString('base64');
+  if (file.pathname.endsWith('/lib/server.ts')) return 'data:text/javascript;base64,' + Buffer.from(`export const database=()=>globalThis.__vendorTestEnvironment.db; export const bucket=()=>globalThis.__vendorTestEnvironment.store; export const bootstrapToken=()=>globalThis.__vendorTestEnvironment.bootstrap||''; export const noticeWebhook=()=>''; export const noticeFeedbackSecret=()=>'';`).toString('base64');
   if (moduleUrls.has(file.href)) return moduleUrls.get(file.href);
   const source = ts.transpileModule(readFileSync(file, 'utf8'), {compilerOptions: {module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022}}).outputText;
   const require = createRequire(file);

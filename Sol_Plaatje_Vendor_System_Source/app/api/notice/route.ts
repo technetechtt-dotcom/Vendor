@@ -1,6 +1,6 @@
 import {withOperationalLease} from '../../../lib/write-lease';
 import {readJsonObject} from '../../../lib/request';
-import {database, noticeWebhook} from '../../../lib/server';
+import {database, noticeFeedbackSecret, noticeWebhook} from '../../../lib/server';
 import {passwordPending, sessionUser} from '../../../lib/accounts';
 import {fieldCorsHeaders, withFieldCors, mutationOriginError} from '../../../lib/cors';
 import {noticePdf, noticeText, noticeVendor} from '../../../lib/notices';
@@ -70,13 +70,54 @@ async function handleGet(req: Request) {
   return new Response(pdf, {headers: {'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="notice-${eventId.slice(0, 8)}.pdf"`, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'}});
 }
 
+async function saveProbe(ok: boolean, detail: string) {
+  const value = JSON.stringify({ok, testedAt: new Date().toISOString(), detail: detail.slice(0, 180)});
+  await database().prepare("INSERT INTO app_meta(key,value) VALUES('notice_probe',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(value).run();
+}
+
+async function recordDeliveryFeedback(req: Request, body: Record<string, unknown>) {
+  const secret = noticeFeedbackSecret();
+  const provided = req.headers.get('x-notice-secret') || '';
+  if (!secret || provided !== secret) return json({error: 'Delivery feedback is not configured. Sender acceptance is not recorded as delivery.'}, 409);
+  const status = String(body.status || '');
+  if (!['delivered', 'bounced'].includes(status)) return json({error: 'Report delivered or bounced.'}, 400);
+  const eventId = String(body.eventId || body.reference || '');
+  const found = await noticeCase(database(), eventId);
+  if (!found) return json({error: 'Notice not found.'}, 404);
+  const detail = String(body.detail || (status === 'delivered' ? 'The sender reported delivery.' : 'The sender reported a bounce.')).slice(0, 300);
+  const db = database();
+  const existing = await db.prepare("SELECT id,status FROM notice_deliveries WHERE event_id=? AND method='municipal' AND status IN ('delivered','bounced') ORDER BY created_at DESC").bind(eventId).first<{id: string; status: string}>();
+  if (existing) return json({ok: true, duplicate: true, status: existing.status, message: 'Delivery feedback was already recorded.'});
+  await db.prepare('INSERT INTO notice_deliveries(id,event_id,method,status,detail,actor,created_at,recipient,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?)')
+    .bind(crypto.randomUUID(), eventId, 'municipal', status, detail, 'Municipal sender', new Date().toISOString(), found.vendor.email.slice(0, 160), String(body.idempotencyKey || '').slice(0, 80)).run();
+  return json({ok: true, status, message: status === 'delivered' ? 'Delivery recorded. This is separate from sender acceptance.' : 'Bounce recorded. The notice was not delivered.'});
+}
+
 async function handlePost(req: Request) {
   const rejected = mutationOriginError(req, true);
   if (rejected) return rejected;
+  const body = await readJsonObject(req);
+  if (body.action === 'delivery-feedback') return recordDeliveryFeedback(req, body);
   const account = await viewer(req);
   if (account instanceof Response) return account;
   if (!can(account.role, 'compliance.write')) return json({error: 'Your role cannot change notice delivery or compliance cases.'}, 403);
-  const body = await readJsonObject(req);
+  if (body.action === 'probe') {
+    const webhook = noticeWebhook();
+    if (!webhook || !webhookAllowed(webhook)) {
+      await saveProbe(false, 'No sender address is configured');
+      return json({ok: false, senderConfigured: false, senderVerified: false, error: 'No municipal sender address is configured.'}, 409);
+    }
+    try {
+      const response = await fetch(webhook, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({probe: true}), signal: AbortSignal.timeout(8000)});
+      await saveProbe(response.ok, 'HTTP ' + response.status);
+      if (!response.ok) return json({ok: false, senderConfigured: true, senderVerified: false, error: 'The sender responded with HTTP ' + response.status + '. The address is configured, but the connection test did not succeed.'}, 502);
+      return json({ok: true, senderConfigured: true, senderVerified: true, message: 'The sender accepted a connection test. No notice was sent, and this is not a delivery receipt.'});
+    } catch (error) {
+      console.error(error);
+      await saveProbe(false, 'The sender could not be reached');
+      return json({ok: false, senderConfigured: true, senderVerified: false, error: 'The sender address is configured, but the connection test could not reach it.'}, 502);
+    }
+  }
   const eventId = String(body.eventId || '');
   const found = await noticeCase(database(), eventId);
   if (!found) return json({error: 'Notice not found.'}, 404);

@@ -26,7 +26,9 @@ export type Operations = {
   permits: PermitRow[];
   requirements: Requirement[];
   allocationHistory: History[];
+  historyHasMore?: boolean;
   imports: ImportRow[];
+  importsHasMore?: boolean;
   audit: Audit[];
   permitDocuments: PermitDocument[];
   renewals: Renewal[];
@@ -35,7 +37,7 @@ export type Operations = {
   settings: {documentNote?: string};
 };
 
-type WorkspaceReply = {error?:string;message?:string;status?:string;reminders:Renewal[];windowDays:number;created:number;audit:Audit[];hasMore:boolean;sessions:{id:string;createdAt:string;expiresAt:string;device:string;current:boolean}[];users:{id:string;name:string;role:string}[]};
+type WorkspaceReply = {error?:string;message?:string;status?:string;reminders:Renewal[];windowDays:number;created:number;audit:Audit[];imports:ImportRow[];allocationHistory:History[];hasMore:boolean;importsHasMore?:boolean;historyHasMore?:boolean;senderConfigured?:boolean;senderVerified?:boolean;senderVerifiedAt?:string;sessions:{id:string;createdAt:string;expiresAt:string;device:string;current:boolean}[];users:{id:string;name:string;role:string}[]};
 
 const date = (value: string) => value ? new Date(value.length === 10 ? value + 'T12:00:00' : value).toLocaleDateString('en-ZA', {day: 'numeric', month: 'short', year: 'numeric'}) : 'Not recorded';
 const dateTime = (value: string) => value ? new Date(value).toLocaleString('en-ZA', {dateStyle: 'medium', timeStyle: 'short'}) : 'Not recorded';
@@ -62,7 +64,7 @@ function auditChanges(row: Audit) {
     .map(key => ({key: key.replaceAll('_', ' '), before: auditValue(before[key]), after: auditValue(after[key])}));
 }
 
-export function Workspaces({page, vendors, entries, hubs, deliveries, operations, senderConnected, capabilities, save, reload, onOpen}: {
+export function Workspaces({page, vendors, entries, hubs, deliveries, operations, senderConfigured = false, senderVerified = false, senderVerifiedAt = '', capabilities, save, reload, onOpen, deliveriesHasMore = false, eventsHasMore = false, onLoadMore}: {
   page: string;
   vendors: Vendor[];
   entries: Entry[];
@@ -70,22 +72,28 @@ export function Workspaces({page, vendors, entries, hubs, deliveries, operations
   deliveries: Delivery[];
   operations: Operations;
   senderConnected: boolean;
+  senderConfigured?: boolean;
+  senderVerified?: boolean;
+  senderVerifiedAt?: string;
   capabilities: Capability[];
   save: (body: Record<string, unknown>) => Promise<boolean>;
   reload: () => Promise<void>;
   onOpen: (vendor: Vendor, tab?: string) => void;
+  deliveriesHasMore?: boolean;
+  eventsHasMore?: boolean;
+  onLoadMore?: (kind: 'deliveries' | 'events' | 'vendors') => Promise<void>;
 }) {
   const vendorName = (id: string) => vendors.find(vendor => vendor.id === id)?.business || id;
   const can = (capability: Capability) => capabilities.includes(capability);
   if (page === 'Follow-ups') return <FollowUps entries={entries} vendors={vendors} save={save} onOpen={onOpen} can={can} />;
-  if (page === 'Reports') return <Reports vendors={vendors} entries={entries} tariffs={operations.tariffs} can={can} />;
-  if (page === 'Unit inventory') return <Inventory hubs={hubs} units={operations.units} pitches={operations.pitches} history={operations.allocationHistory} vendorName={vendorName} save={save} can={can} />;
+  if (page === 'Reports') return <><Reports vendors={vendors} entries={entries} tariffs={operations.tariffs} can={can} />{eventsHasMore && onLoadMore && <button className="secondary" type="button" onClick={() => onLoadMore('events')}>Load older activity for a complete report</button>}</>;
+  if (page === 'Unit inventory') return <Inventory hubs={hubs} units={operations.units} pitches={operations.pitches} history={operations.allocationHistory} historyHasMore={Boolean(operations.historyHasMore)} vendorName={vendorName} save={save} can={can} />;
   if (page === 'Permits & cards') return <Permits reload={reload} vendors={vendors} permits={operations.permits} documents={operations.permitDocuments} renewals={operations.renewals} save={save} onOpen={onOpen} can={can} />;
   if (page === 'Tariffs & reconciliation') return <Tariffs vendors={vendors} entries={entries} tariffs={operations.tariffs} save={save} can={can} />;
-  if (page === 'Notice queue') return <NoticeQueue entries={entries} vendors={vendors} deliveries={deliveries} senderConnected={senderConnected} reload={reload} onOpen={onOpen} />;
+  if (page === 'Notice queue') return <NoticeQueue entries={entries} vendors={vendors} deliveries={deliveries} senderConfigured={senderConfigured} senderVerified={senderVerified} senderVerifiedAt={senderVerifiedAt} hasMore={deliveriesHasMore} onLoadMore={onLoadMore ? () => onLoadMore('deliveries') : undefined} reload={reload} onOpen={onOpen} />;
   if (page === 'Audit') return <AuditList rows={operations.audit} integrity={operations.auditIntegrity} issues={operations.integrityIssues} save={save} can={can} />;
-  if (page === 'Settings') return <SettingsPanel settings={operations.settings} requirements={operations.requirements} senderConnected={senderConnected} save={save} can={can} />;
-  if (page === 'Import') return <ImportPanel rows={operations.imports} save={save} can={can} />;
+  if (page === 'Settings') return <SettingsPanel settings={operations.settings} requirements={operations.requirements} senderConfigured={senderConfigured} senderVerified={senderVerified} senderVerifiedAt={senderVerifiedAt} save={save} can={can} reload={reload} />;
+  if (page === 'Import') return <ImportPanel rows={operations.imports} hasMore={Boolean(operations.importsHasMore)} save={save} can={can} />;
   if (page === 'Backup') return <BackupPanel can={can} />;
   if (page === 'Sessions') return <SessionsPanel />;
   return null;
@@ -243,9 +251,26 @@ function DatasetNotice({label}: {label: string}) {
   return <p className="hint">These {label} are only what staff have entered here. Their presence does not confirm that the municipality’s verified operational dataset is complete.</p>;
 }
 
-function Inventory({hubs, units, pitches, history, vendorName, save, can}: {hubs: Hub[]; units: Unit[]; pitches: Pitch[]; history: History[]; vendorName: (id: string) => string; save: (body: Record<string, unknown>) => Promise<boolean>; can: (capability: Capability) => boolean}) {
+function Inventory({hubs, units, pitches, history, historyHasMore, vendorName, save, can}: {hubs: Hub[]; units: Unit[]; pitches: Pitch[]; history: History[]; historyHasMore: boolean; vendorName: (id: string) => string; save: (body: Record<string, unknown>) => Promise<boolean>; can: (capability: Capability) => boolean}) {
   const [editing, setEditing] = useState<Unit | null>(null);
   const [busy, setBusy] = useState(false);
+  const [older, setOlder] = useState<History[]>([]);
+  const [moreLeft, setMoreLeft] = useState(historyHasMore);
+  const [historyError, setHistoryError] = useState('');
+  const shown = [...history, ...older];
+  async function loadOlderHistory() {
+    setBusy(true);
+    setHistoryError('');
+    try {
+      const response = await fetch('/api/register?historyOffset=' + shown.length);
+      const body: WorkspaceReply = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Older allocation history could not be loaded.');
+      if (Array.isArray(body.allocationHistory)) setOlder(current => [...current, ...body.allocationHistory]);
+      setMoreLeft(Boolean(body.historyHasMore));
+    } catch (cause) {
+      setHistoryError(cause instanceof Error ? cause.message : 'Older allocation history could not be loaded.');
+    } finally { setBusy(false); }
+  }
   const clear = () => setEditing(null);
   return <>
     <section className="panel"><h2>Hub inventories</h2><DatasetNotice label="hub units and pitches" /><p>{units.length} unit record{units.length === 1 ? '' : 's'} and {pitches.length} pitch record{pitches.length === 1 ? '' : 's'} are stored. Empty counts mean the verified municipal inventory has not been loaded.</p></section>
@@ -271,7 +296,7 @@ function Inventory({hubs, units, pitches, history, vendorName, save, can}: {hubs
     <section className="panel">
       <div className="table-wrap stack"><table><thead><tr><th scope="col" data-label="Hub">Hub</th><th scope="col" data-label="Unit">Unit</th><th scope="col" className="num" data-label="Capacity">Capacity</th><th scope="col" data-label="Status">Status</th><th scope="col" data-label="Notes">Notes</th><th scope="col" data-label=""></th></tr></thead><tbody>{units.map(unit => <tr key={unit.id}><td data-label="Hub">{unit.hub || unit.hubId}</td><td data-label="Unit">{unit.unitCode}</td><td className="num" data-label="Capacity">{unit.capacity}</td><td data-label="Status">{unit.status}</td><td data-label="Notes">{unit.notes}</td><td data-label=""><div className="actions">{can('hubs.write') && <><button className="secondary" type="button" onClick={() => setEditing(unit)}>Edit</button><button className="secondary" type="button" onClick={async () => { if (!window.confirm('Remove unit ' + unit.unitCode + ' from ' + (unit.hub || unit.hubId) + '? Recorded change history is kept.')) return; await save({action: 'unit-delete', id: unit.id}); }}>Remove</button></>}</div></td></tr>)}</tbody></table>{!units.length && <div className="empty">No units recorded yet. Allocating a trader creates an occupied unit.</div>}</div>
     </section>
-    <section className="panel"><h2>Allocation history</h2>{history.map(item => <div className="history" key={item.id}><span className="timeline-dot" /><div><strong>{item.action}</strong><p>{vendorName(item.vendorId)} · unit {item.unitCode}. {item.note}</p><small>{date(item.createdAt)} · {item.actor}</small></div></div>)}{!history.length && <p className="muted">No allocation changes recorded yet.</p>}</section>
+    <section className="panel"><h2>Allocation history</h2>{historyError && <p className="field-alert" role="alert">{historyError}</p>}{shown.map(item => <div className="history" key={item.id}><span className="timeline-dot" /><div><strong>{item.action}</strong><p>{vendorName(item.vendorId)} · unit {item.unitCode}. {item.note}</p><small>{date(item.createdAt)} · {item.actor}</small></div></div>)}{moreLeft && <button className="secondary" type="button" disabled={busy} onClick={loadOlderHistory}>{busy ? 'Loading older history…' : 'Load older allocation history'}</button>}{!shown.length && <p className="muted">No allocation changes recorded yet.</p>}</section>
     <PitchForm pitches={pitches} save={save} />
   </>;
 }
@@ -386,7 +411,7 @@ function Tariffs({vendors, entries, tariffs, save, can}: {vendors: Vendor[]; ent
   </>;
 }
 
-function NoticeQueue({entries, vendors, deliveries, senderConnected, reload, onOpen}: {entries: Entry[]; vendors: Vendor[]; deliveries: Delivery[]; senderConnected: boolean; reload: () => Promise<void>; onOpen: (vendor: Vendor, tab?: string) => void}) {
+function NoticeQueue({entries, vendors, deliveries, senderConfigured, senderVerified, senderVerifiedAt, hasMore, onLoadMore, reload, onOpen}: {entries: Entry[]; vendors: Vendor[]; deliveries: Delivery[]; senderConfigured: boolean; senderVerified: boolean; senderVerifiedAt: string; hasMore: boolean; onLoadMore?: () => Promise<void>; reload: () => Promise<void>; onOpen: (vendor: Vendor, tab?: string) => void}) {
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   async function retry(eventId: string) {
@@ -405,32 +430,53 @@ function NoticeQueue({entries, vendors, deliveries, senderConnected, reload, onO
       try { await reload(); } catch { setMessage(current => current || 'The queue could not be refreshed.'); }
     }
   }
-  return <section className="panel"><div className="panel-head"><div><h2>Notice delivery</h2><p>{senderConnected ? 'The municipal sender is connected. Acceptance is not proof the trader opened the message.' : 'The municipal sender is not connected. Handover, acknowledgement and PDF downloads are still recorded.'}</p>{message && <p className="hint">{message}</p>}</div></div>{deliveries.map(item => {
+  return <section className="panel"><div className="panel-head"><div><h2>Notice delivery</h2><p>{senderConfigured ? 'Sender address: configured. ' : 'Sender address: not configured. '}{senderVerified ? 'Connection test succeeded' + (senderVerifiedAt ? ' ' + dateTime(senderVerifiedAt) : '') + '.' : 'Connection test: not yet successful.'} Acceptance by the sender is not delivery. A delivered or bounced status appears only after the sender reports it.</p>{message && <p className="hint">{message}</p>}</div></div>{deliveries.map(item => {
     const entry = entries.find(event => event.id === item.eventId);
     const vendor = vendors.find(record => record.id === entry?.vendorId);
     const failed = item.status === 'failed' || item.status === 'rejected';
     const detail = item.detail && ![item.method, item.status].some(value => item.detail?.toLowerCase() === value.toLowerCase()) ? item.detail : '';
-    return <div className="case-row" key={item.id}><div className="case-main"><strong>{vendor?.business || 'Unknown vendor'} · {entry?.kind || 'Notice'}</strong><p>{entry?.note || 'The source compliance finding is unavailable.'}</p><small>Delivery: {item.method} · {item.status}{detail ? ' · ' + detail : ''}<br />Recipient: {vendor?.email || vendor?.phone || 'No contact detail recorded'} · {dateTime(item.createdAt)} · {item.actor}</small></div>{vendor && <button className="secondary" type="button" onClick={() => onOpen(vendor, 'Compliance')}>Open case</button>}{failed && senderConnected && <button className="secondary" type="button" disabled={busy === item.eventId} onClick={() => retry(item.eventId)}>Retry send</button>}</div>;
-  })}{!deliveries.length && <div className="empty">No delivery records yet.</div>}</section>;
+    return <div className="case-row" key={item.id}><div className="case-main"><strong>{vendor?.business || 'Unknown vendor'} · {entry?.kind || 'Notice'}</strong><p>{entry?.note || 'The source compliance finding is unavailable.'}</p><small>Delivery: {item.method} · {item.status}{detail ? ' · ' + detail : ''}<br />Recipient: {vendor?.email || vendor?.phone || 'No contact detail recorded'} · {dateTime(item.createdAt)} · {item.actor}</small></div>{vendor && <button className="secondary" type="button" onClick={() => onOpen(vendor, 'Compliance')}>Open case</button>}{failed && senderConfigured && <button className="secondary" type="button" disabled={busy === item.eventId} onClick={() => retry(item.eventId)}>Retry send</button>}</div>;
+  })}{hasMore && onLoadMore && <button className="secondary" type="button" onClick={() => void onLoadMore()}>Load older notices</button>}{!deliveries.length && <div className="empty">No delivery records yet.</div>}</section>;
 }
 
 function AuditList({rows, integrity, issues, save, can}: {rows: Audit[]; integrity: AuditIntegrity; issues: IntegrityIssue[]; save: (body: {action: string; id: string; note: string}) => Promise<boolean>; can: (capability: Capability) => boolean}) {
   const [query, setQuery] = useState('');
   const [more, setMore] = useState<Audit[]>([]);
+  const [matches, setMatches] = useState<Audit[] | null>(null);
   const [hasMore, setHasMore] = useState(rows.length >= 200);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [resolving, setResolving] = useState('');
-  const visible = [...rows, ...more];
-  const filtered = visible.filter(row => !query || [row.entity, row.entityId, row.action, row.actor, row.beforeJson, row.afterJson].join(' ').toLowerCase().includes(query.toLowerCase()));
+  const visible = matches || [...rows, ...more];
+  useEffect(() => {
+    const term = query.trim();
+    if (!term) { setMatches(null); setHasMore(rows.length + more.length >= 200); return; }
+    const handle = setTimeout(() => {
+      setLoading(true);
+      setError('');
+      fetch('/api/register?auditOffset=0&auditQuery=' + encodeURIComponent(term))
+        .then(response => response.json().then(body => ({ok: response.ok, body: body as WorkspaceReply})))
+        .then(({ok, body}) => {
+          if (!ok) throw new Error(body.error || 'The audit history could not be searched.');
+          setMatches(Array.isArray(body.audit) ? body.audit : []);
+          setHasMore(Boolean(body.hasMore));
+        })
+        .catch(cause => setError(cause instanceof Error ? cause.message : 'The audit history could not be searched.'))
+        .finally(() => setLoading(false));
+    }, 250);
+    return () => clearTimeout(handle);
+  }, [query, rows.length, more.length]);
   async function loadOlder() {
     setLoading(true);
     setError('');
     try {
-      const response = await fetch('/api/register?auditOffset=' + visible.length);
+      const term = query.trim();
+      const response = await fetch('/api/register?auditOffset=' + visible.length + (term ? '&auditQuery=' + encodeURIComponent(term) : ''));
       const body: WorkspaceReply = await response.json();
       if (!response.ok) throw new Error(body.error || 'Older audit records could not be loaded.');
-      if (Array.isArray(body.audit)) setMore(current => [...current, ...body.audit]);
+      const next = Array.isArray(body.audit) ? body.audit : [];
+      if (term) setMatches(current => [...(current || []), ...next]);
+      else setMore(current => [...current, ...next]);
       setHasMore(Boolean(body.hasMore));
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Older audit records could not be loaded.'); }
     finally { setLoading(false); }
@@ -452,15 +498,15 @@ function AuditList({rows, integrity, issues, save, can}: {rows: Audit[]; integri
           ? `Tamper check passed. ${integrity.rows} entries sealed, last sealed ${date(integrity.sealedAt)}.`
           : `Tamper check FAILED. ${integrity.rows} entries are stored but the seal covers ${integrity.sealedRows}. An audit entry was altered or removed outside this application.`)
         : 'The audit seal has not been written yet. It is written after the next recorded change.'}
-    </div>{filtered.map(row => { const changes = auditChanges(row); return <div className="history" key={row.id}><span className="timeline-dot" /><div><strong>{row.entity.replaceAll('-', ' ')} · {row.action}</strong><p className="mono">{row.entityId}</p><small>{dateTime(row.createdAt)} · {row.actor}</small>{changes.length > 0 && <ul className="audit-diff">{changes.map(change => <li key={change.key}><span>{change.key}</span><del>{change.before}</del><ins>{change.after}</ins></li>)}</ul>}</div></div>; })}{hasMore && <button className="secondary" type="button" disabled={loading} onClick={loadOlder}>{loading ? 'Loading older records…' : 'Load older records'}</button>}{!filtered.length && <div className="empty">No matching audit records.</div>}</section>;
+    </div>{visible.map(row => { const changes = auditChanges(row); return <div className="history" key={row.id}><span className="timeline-dot" /><div><strong>{row.entity.replaceAll('-', ' ')} · {row.action}</strong><p className="mono">{row.entityId}</p><small>{dateTime(row.createdAt)} · {row.actor}</small>{changes.length > 0 && <ul className="audit-diff">{changes.map(change => <li key={change.key}><span>{change.key}</span><del>{change.before}</del><ins>{change.after}</ins></li>)}</ul>}</div></div>; })}{hasMore && <button className="secondary" type="button" disabled={loading} onClick={loadOlder}>{loading ? 'Loading older records…' : 'Load older records'}</button>}{!visible.length && <div className="empty">No matching audit records.</div>}</section>;
 }
 
-function SettingsPanel({settings, requirements, senderConnected, save, can}: {settings: {documentNote?: string}; requirements: Requirement[]; senderConnected: boolean; save: (body: Record<string, unknown>) => Promise<boolean>; can: (capability: Capability) => boolean}) {
+function SettingsPanel({settings, requirements, senderConfigured, senderVerified, senderVerifiedAt, save, can, reload}: {settings: {documentNote?: string}; requirements: Requirement[]; senderConfigured: boolean; senderVerified: boolean; senderVerifiedAt: string; save: (body: Record<string, unknown>) => Promise<boolean>; can: (capability: Capability) => boolean; reload: () => Promise<void>}) {
   const [editing, setEditing] = useState<Requirement | null>(null);
   const [note, setNote] = useState(settings.documentNote || '');
   const [busy, setBusy] = useState(false);
   return <>
-    <section className="panel"><h2>Operational status</h2><p>Register database: available, because this workspace loaded.</p><p>Municipal notice sender: {senderConnected ? 'connected' : 'not connected'}. The sender address is set on the server. This screen cannot mark mail as sent.</p><p className="hint">Account recovery is done by the super user, who sets a temporary password from Users. There is no email reset.</p><DatasetNotice label="document rules" /><p>{requirements.length ? requirements.length + ' document rule' + (requirements.length === 1 ? '' : 's') + ' stored.' : 'No municipal document rules have been entered. Registration checklists fall back to the built-in labels until verified rules are recorded.'}</p></section>
+    <section className="panel"><h2>Operational status</h2><p>Register database: available, because this workspace loaded.</p><p>Sender address: {senderConfigured ? 'configured on the server' : 'not configured'}. Connection test: {senderVerified ? 'succeeded' + (senderVerifiedAt ? ' ' + dateTime(senderVerifiedAt) : '') : 'not yet successful'}. A configured address is not a successful test, and a successful test is not proof that a notice was delivered.</p><button className="secondary" type="button" disabled={busy || !(can('compliance.write') || can('settings.write'))} onClick={async () => { setBusy(true); try { const response = await fetch('/api/notice', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'probe'})}); const body = await response.json() as {error?: string; message?: string}; if (!response.ok) throw new Error(body.error || 'The connection test failed.'); await reload(); } catch (cause) { window.alert(cause instanceof Error ? cause.message : 'The connection test failed.'); } finally { setBusy(false); } }}>Test sender connection</button><p className="hint">Account recovery is done by the super user, who sets a temporary password from Users. There is no email reset.</p><DatasetNotice label="document rules" /><p>{requirements.length ? requirements.length + ' document rule' + (requirements.length === 1 ? '' : 's') + ' stored.' : 'No municipal document rules have been entered. Registration checklists fall back to the built-in labels until verified rules are recorded.'}</p></section>
     <form className="panel" onSubmit={async event => { event.preventDefault(); setBusy(true); try { await save({action: 'settings', documentNote: note}); } finally { setBusy(false); } }}>
       <label>Document requirements note<textarea name="documentNote" rows={4} value={note} onChange={event => setNote(event.target.value)} /></label>
       <button className="primary" type="submit" disabled={busy || !can('settings.write')}>Save note</button>
@@ -487,28 +533,56 @@ function SettingsPanel({settings, requirements, senderConnected, save, can}: {se
   </>;
 }
 
-function ImportPanel({rows, save, can}: {rows: ImportRow[]; save: (body: Record<string, unknown>) => Promise<boolean>; can: (capability: Capability) => boolean}) {
+function ImportPanel({rows, hasMore, save, can}: {rows: ImportRow[]; hasMore: boolean; save: (body: Record<string, unknown>) => Promise<boolean>; can: (capability: Capability) => boolean}) {
   const [editing, setEditing] = useState<ImportRow | null>(null);
+  const [acting, setActing] = useState('');
+  const [older, setOlder] = useState<ImportRow[]>([]);
+  const [moreLeft, setMoreLeft] = useState(hasMore);
+  const [listError, setListError] = useState('');
+  const shown = [...rows, ...older];
   const record = editing ? JSON.parse(editing.payload || '{}') : null;
+  async function act(body: Record<string, unknown>) {
+    const id = String(body.id || body.action || '');
+    if (acting) return false;
+    setActing(id);
+    try { return await save(body); }
+    finally { setActing(''); }
+  }
+  async function loadOlder() {
+    setListError('');
+    setActing('older');
+    try {
+      const response = await fetch('/api/register?importOffset=' + shown.length);
+      const body: WorkspaceReply = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Older import rows could not be loaded.');
+      if (Array.isArray(body.imports)) setOlder(current => [...current, ...body.imports]);
+      setMoreLeft(Boolean(body.importsHasMore));
+    } catch (cause) {
+      setListError(cause instanceof Error ? cause.message : 'Older import rows could not be loaded.');
+    } finally { setActing(''); }
+  }
   return <>
-    <form className="panel" onSubmit={async event => { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); if (await save({action: 'import', csv: data.get('csv')})) form.reset(); }}>
-      <div className="panel-head"><div><h2>Legacy import</h2><p>Paste rows with a header: name, business, type, and optionally sector, hub, unit, address, lat, lng, phone, email, issued, expires. Nothing is added to the register until a pending row is approved. Rows that fail approval stay open for correction or an explicit reject.</p></div></div>
+    <form className="panel" onSubmit={async event => { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); if (await act({action: 'import', csv: data.get('csv')})) form.reset(); }}>
+      <div className="panel-head"><div><h2>Legacy import</h2><p>Paste rows with a header: name, business, type, and optionally sector, hub, unit, address, lat, lng, phone, email, issued, expires. Nothing is added to the register until a pending row is approved. Submit at most 300 data rows at a time. A larger file is refused so rows are not silently dropped.</p></div></div>
       <textarea name="csv" rows={8} required placeholder={'name,business,type,hub,unit\nAmahle Dube,Dube Stalls,Informal,,'} />
-      <button className="primary" type="submit" disabled={!can('import.write')}>Check rows</button>
+      <button className="primary" type="submit" disabled={Boolean(acting) || !can('import.write')}>{acting === 'import' ? 'Checking rows…' : 'Check rows'}</button>
     </form>
     <section className="panel">
-      {rows.map(row => {
+      {listError && <p className="field-alert" role="alert">{listError}</p>}
+      {shown.map(row => {
         const item = JSON.parse(row.payload || '{}');
+        const locked = Boolean(acting);
         return <div className="case-row" key={row.id}>
           <div className="case-main"><strong>{item.business || 'Row'}</strong><p>{row.status}{row.note ? ' · ' + row.note : ''}</p><small>{item.name} · {item.type}</small></div>
           <div className="actions">
-            {row.status === 'pending' && can('import.write') && <button className="secondary" type="button" onClick={() => save({action: 'approve-import', id: row.id})}>Approve import</button>}
-            {can('import.write') && ['pending', 'needs-correction', 'invalid', 'duplicate', 'rejected'].includes(row.status) && <button className="secondary" type="button" onClick={() => setEditing(row)}>{row.status === 'rejected' ? 'Correct and reopen' : 'Edit row'}</button>}
-            {can('import.write') && ['pending', 'needs-correction', 'invalid', 'duplicate'].includes(row.status) && <button className="secondary" type="button" onClick={() => { const note = window.prompt('Why is this import row rejected?'); if (note && note.trim().length > 2) save({action: 'reject-import', id: row.id, note: note.trim()}); }}>Reject</button>}
+            {row.status === 'pending' && can('import.write') && <button className="secondary" type="button" disabled={locked} onClick={() => void act({action: 'approve-import', id: row.id})}>{acting === row.id ? 'Approving…' : 'Approve import'}</button>}
+            {can('import.write') && ['pending', 'needs-correction', 'invalid', 'duplicate', 'rejected'].includes(row.status) && <button className="secondary" type="button" disabled={locked} onClick={() => setEditing(row)}>{row.status === 'rejected' ? 'Correct and reopen' : 'Edit row'}</button>}
+            {can('import.write') && ['pending', 'needs-correction', 'invalid', 'duplicate'].includes(row.status) && <button className="secondary" type="button" disabled={locked} onClick={() => { const note = window.prompt('Why is this import row rejected?'); if (note && note.trim().length > 2) void act({action: 'reject-import', id: row.id, note: note.trim()}); }}>Reject</button>}
           </div>
         </div>;
       })}
-      {!rows.length && <div className="empty">No import batches yet.</div>}
+      {moreLeft && <button className="secondary" type="button" disabled={Boolean(acting)} onClick={() => void loadOlder()}>{acting === 'older' ? 'Loading older rows…' : 'Load older import rows'}</button>}
+      {!shown.length && <div className="empty">No import batches yet.</div>}
     </section>
     {editing && record && <form className="panel" key={editing.id} onSubmit={async event => {
       event.preventDefault();

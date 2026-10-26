@@ -86,13 +86,17 @@ export async function officeBundle(db: Sql) {
     db.prepare('SELECT id,category,amount_cents AS amountCents,effective_from AS effectiveFrom,effective_to AS effectiveTo,applicability,approval_ref AS approvalRef,created_at AS createdAt FROM fee_schedules ORDER BY effective_from DESC').all<{id: string; category: string; amountCents: number; effectiveFrom: string; effectiveTo: string; applicability: string; approvalRef: string; createdAt: string}>(),
     db.prepare('SELECT id,vendor_id AS vendorId,permit_number AS permitNumber,card_serial AS cardSerial,status,note,actor,created_at AS createdAt FROM permits ORDER BY created_at DESC').all<{id: string; vendorId: string; permitNumber: string; cardSerial: string; status: string; note: string; actor: string; createdAt: string}>(),
     db.prepare('SELECT id,rule_ref AS ruleRef,category,document_label AS documentLabel,validity_months AS validityMonths FROM requirements ORDER BY category,document_label').all<{id: string; ruleRef: string; category: string; documentLabel: string; validityMonths: number}>(),
-    db.prepare('SELECT id,hub_id AS hubId,unit_code AS unitCode,vendor_id AS vendorId,action,actor,created_at AS createdAt,note FROM allocation_history ORDER BY created_at DESC LIMIT 200').all<{id: string; hubId: string; unitCode: string; vendorId: string; action: string; actor: string; createdAt: string; note: string}>(),
-    db.prepare('SELECT id,batch_id AS batchId,payload,status,note,created_at AS createdAt FROM import_rows ORDER BY created_at DESC LIMIT 200').all<{id: string; batchId: string; payload: string; status: string; note: string; createdAt: string}>(),
+    db.prepare(historySelect + ' LIMIT ' + historyPageSize).all<{id: string; hubId: string; unitCode: string; vendorId: string; action: string; actor: string; createdAt: string; note: string}>(),
+    db.prepare(importSelect + ' LIMIT ' + historyPageSize).all<{id: string; batchId: string; payload: string; status: string; note: string; createdAt: string}>(),
     db.prepare('SELECT id,entity,entity_id AS entityId,action,before_json AS beforeJson,after_json AS afterJson,actor,actor_id AS actorId,created_at AS createdAt FROM audit_log ORDER BY created_at DESC LIMIT 200').all<{id: string; entity: string; entityId: string; action: string; beforeJson: string; afterJson: string; actor: string; actorId: string; createdAt: string}>(),
     db.prepare('SELECT id,vendor_id AS vendorId,kind,card_serial AS cardSerial,permit_expires AS permitExpires,note,actor,created_at AS createdAt FROM permit_documents ORDER BY created_at DESC LIMIT 200').all<{id: string; vendorId: string; kind: string; cardSerial: string; permitExpires: string; note: string; actor: string; createdAt: string}>(),
     db.prepare('SELECT id,vendor_id AS vendorId,expires,days_left AS daysLeft,status,note,actor,created_at AS createdAt FROM renewal_reminders ORDER BY expires LIMIT 200').all<{id: string; vendorId: string; expires: string; daysLeft: number; status: string; note: string; actor: string; createdAt: string}>(),
     db.prepare("SELECT value FROM app_meta WHERE key='operations'").first<{value: string}>(),
     db.prepare("SELECT id,entity,entity_id AS entityId,parent_id AS parentId,issue,payload,detected_at AS detectedAt,resolved_at AS resolvedAt FROM integrity_issues WHERE resolved_at='' ORDER BY detected_at DESC").all<{id: string; entity: string; entityId: string; parentId: string; issue: string; payload: string; detectedAt: string; resolvedAt: string}>(),
+  ]);
+  const [importCount, historyCount] = await Promise.all([
+    db.prepare('SELECT COUNT(*) AS n FROM import_rows').first<{n: number}>(),
+    db.prepare('SELECT COUNT(*) AS n FROM allocation_history').first<{n: number}>(),
   ]);
   let auditIntegrity = await checkAuditIntegrity(db);
   if (!auditIntegrity.sealed) {
@@ -106,7 +110,9 @@ export async function officeBundle(db: Sql) {
     permits: permits.results,
     requirements: requirements.results,
     allocationHistory: history.results,
+    historyHasMore: history.results.length < Number(historyCount?.n || 0),
     imports: imports.results,
+    importsHasMore: imports.results.length < Number(importCount?.n || 0),
     audit: audit.results,
     permitDocuments: permitDocuments.results,
     renewals: renewals.results,
@@ -213,11 +219,100 @@ export async function renameHub(db: Sql, id: string, name: string, previousName:
   await sealAuditTail(db);
 }
 
-export async function auditPage(db: Sql, offset: number) {
-  const start = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
-  const size = 200;
-  const rows = await db.prepare('SELECT id,entity,entity_id AS entityId,action,before_json AS beforeJson,after_json AS afterJson,actor,actor_id AS actorId,created_at AS createdAt FROM audit_log ORDER BY created_at DESC LIMIT ' + size + ' OFFSET ?').bind(start).all<{id: string; entity: string; entityId: string; action: string; beforeJson: string; afterJson: string; actor: string; actorId: string; createdAt: string}>();
-  return {audit: rows.results, hasMore: rows.results.length === size};
+const listPage = 100;
+const historyPageSize = 200;
+const auditSelect = 'SELECT id,entity,entity_id AS entityId,action,before_json AS beforeJson,after_json AS afterJson,actor,actor_id AS actorId,created_at AS createdAt FROM audit_log';
+const importOrder = "ORDER BY CASE WHEN status IN ('pending','rejected','needs-correction','invalid','duplicate') THEN 0 ELSE 1 END, created_at DESC";
+const importSelect = 'SELECT id,batch_id AS batchId,payload,status,note,created_at AS createdAt FROM import_rows ' + importOrder;
+const historySelect = 'SELECT id,hub_id AS hubId,unit_code AS unitCode,vendor_id AS vendorId,action,actor,created_at AS createdAt,note FROM allocation_history ORDER BY created_at DESC';
+
+function pageStart(offset: number) {
+  return Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
+}
+
+export async function auditPage(db: Sql, offset: number, query = '') {
+  const start = pageStart(offset);
+  const size = historyPageSize;
+  const term = query.trim().slice(0, 80);
+  const like = '%' + term.replace(/[%_]/g, '') + '%';
+  const where = term ? "WHERE entity LIKE ? OR entity_id LIKE ? OR action LIKE ? OR actor LIKE ? OR ifnull(before_json,'') LIKE ? OR ifnull(after_json,'') LIKE ?" : '';
+  const statement = db.prepare(auditSelect + ' ' + where + ' ORDER BY created_at DESC LIMIT ' + size + ' OFFSET ?');
+  const rows = await (term ? statement.bind(like, like, like, like, like, like, start) : statement.bind(start)).all<{id: string; entity: string; entityId: string; action: string; beforeJson: string; afterJson: string; actor: string; actorId: string; createdAt: string}>();
+  return {audit: rows.results, hasMore: rows.results.length === size, query: term};
+}
+
+export async function importPage(db: Sql, offset: number) {
+  const start = pageStart(offset);
+  const rows = await db.prepare(importSelect + ' LIMIT ' + historyPageSize + ' OFFSET ?').bind(start).all<{id: string; batchId: string; payload: string; status: string; note: string; createdAt: string}>();
+  const total = await db.prepare('SELECT COUNT(*) AS n FROM import_rows').first<{n: number}>();
+  const count = Number(total?.n || 0);
+  return {imports: rows.results, importsHasMore: start + rows.results.length < count, importNext: start + rows.results.length};
+}
+
+export async function allocationHistoryPage(db: Sql, offset: number) {
+  const start = pageStart(offset);
+  const rows = await db.prepare(historySelect + ' LIMIT ' + historyPageSize + ' OFFSET ?').bind(start).all<{id: string; hubId: string; unitCode: string; vendorId: string; action: string; actor: string; createdAt: string; note: string}>();
+  const total = await db.prepare('SELECT COUNT(*) AS n FROM allocation_history').first<{n: number}>();
+  const count = Number(total?.n || 0);
+  return {allocationHistory: rows.results, historyHasMore: start + rows.results.length < count, historyNext: start + rows.results.length};
+}
+
+export async function vendorSlice(db: Sql, offset: number) {
+  const start = pageStart(offset);
+  const rows = await db.prepare('SELECT payload FROM vendors ORDER BY updated_at DESC LIMIT ? OFFSET ?').bind(listPage, start).all<{payload: string}>();
+  const total = await db.prepare('SELECT COUNT(*) AS n FROM vendors').first<{n: number}>();
+  const count = Number(total?.n || 0);
+  return {vendors: rows.results.map(row => JSON.parse(row.payload)), vendorTotal: count, vendorsHasMore: start + rows.results.length < count, vendorNext: start + rows.results.length};
+}
+
+export async function eventSlice(db: Sql, offset: number) {
+  const start = pageStart(offset);
+  const recent = await db.prepare(`SELECT ${eventSelect} FROM events ORDER BY created_at DESC LIMIT ? OFFSET ?`).bind(listPage, start).all<{id: string}>();
+  const open = start === 0 ? await db.prepare(`SELECT ${eventSelect} FROM events WHERE resolved=0 AND kind IN ('Warning','Violation') ORDER BY created_at DESC`).all<{id: string}>() : {results: [] as {id: string}[]};
+  const seen = new Set<string>();
+  const events = [];
+  for (const row of [...open.results, ...recent.results]) {
+    if (seen.has(row.id)) continue;
+    seen.add(row.id);
+    events.push(row);
+  }
+  const total = await db.prepare('SELECT COUNT(*) AS n FROM events').first<{n: number}>();
+  const count = Number(total?.n || 0);
+  return {events, eventTotal: count, eventsHasMore: start + recent.results.length < count, eventNext: start + recent.results.length};
+}
+
+export async function moneyIndex(db: Sql) {
+  const rows = await db.prepare("SELECT id,vendor_id AS vendorId,kind,amount,reversal_of AS reversalOf FROM events WHERE kind IN ('Charge','Payment','Reversal')").all<{id: string; vendorId: string; kind: string; amount: number; reversalOf: string}>();
+  const list = rows.results;
+  const balances: Record<string, number> = {};
+  let charges = 0;
+  let payments = 0;
+  for (const row of list) {
+    if (row.kind === 'Charge') charges += row.amount;
+    else if (row.kind === 'Payment') payments += row.amount;
+    else if (row.kind === 'Reversal') {
+      const original = list.find(item => item.id === row.reversalOf);
+      if (original?.kind === 'Payment') payments -= row.amount;
+      else charges -= row.amount;
+    }
+    let delta = 0;
+    if (row.kind === 'Charge') delta = row.amount;
+    else if (row.kind === 'Payment') delta = -row.amount;
+    else if (row.kind === 'Reversal') {
+      const original = list.find(item => item.id === row.reversalOf);
+      delta = original?.kind === 'Charge' ? -row.amount : row.amount;
+    }
+    if (delta) balances[row.vendorId] = (balances[row.vendorId] || 0) + delta;
+  }
+  return {balances, charges, payments};
+}
+
+export async function deliverySlice(db: Sql, offset: number) {
+  const start = pageStart(offset);
+  const rows = await db.prepare('SELECT id,event_id AS eventId,method,status,detail,actor,created_at AS createdAt FROM notice_deliveries ORDER BY created_at DESC LIMIT ? OFFSET ?').bind(listPage, start).all<{id: string; eventId: string; method: string; status: string; detail: string; actor: string; createdAt: string}>();
+  const total = await db.prepare('SELECT COUNT(*) AS n FROM notice_deliveries').first<{n: number}>();
+  const count = Number(total?.n || 0);
+  return {deliveries: rows.results, deliveryTotal: count, deliveriesHasMore: start + rows.results.length < count, deliveryNext: start + rows.results.length};
 }
 
 export async function claimAttachments(db: Sql, vendorId: string, keys: string[]) {
@@ -487,7 +582,8 @@ export async function applyOperation(db: Sql, account: {id: string; name: string
     const required = ['name', 'business', 'type'];
     if (required.some(column => !headers.includes(column))) throw new Error('The first row must include name, business and type.');
     const batch = crypto.randomUUID();
-    const lines = table.slice(0, 300);
+    if (table.length > 300) throw new Error('This import has ' + table.length + ' data rows. Submit at most 300 rows at a time. Nothing from this file was staged.');
+    const lines = table;
     for (const cells of lines) {
       const record: Record<string, string> = {};
       headers.forEach((header, index) => { record[header] = cells[index] || ''; });

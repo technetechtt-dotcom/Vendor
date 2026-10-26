@@ -79,7 +79,10 @@ export function App() {
     if (!vendorId || !getSession()?.id) return;
     const drafts = readDrafts();
     if (!note.trim() && !due && !gps) delete drafts[vendorId];
-    else drafts[vendorId] = {note, due, kind, gps, key: visitKey.current || crypto.randomUUID()};
+    else {
+      if (!visitKey.current) visitKey.current = crypto.randomUUID();
+      drafts[vendorId] = {note, due, kind, gps, key: visitKey.current};
+    }
     writeDrafts(drafts);
   }
   function readQueue(): QueueItem[] {
@@ -173,6 +176,7 @@ export function App() {
     syncLock.current = true;
     let sent = 0;
     let attempted = 0;
+    let sessionStopped = false;
     try {
       const snapshot = readQueue().filter(item => item.officialId === officialId && item.registerBase === base && item.state === 'waiting' && item.payload?.action);
       for (const item of snapshot) {
@@ -192,15 +196,21 @@ export function App() {
             continue;
           }
           const outcome = classifySyncResponse(response.status, body);
-          if (outcome.sessionExpired) { clearSession(); setSession(null); }
           writeQueue(mergeVisit(current, officialId, key, {...live, state: outcome.state, error: outcome.error}));
+          if (outcome.sessionExpired) {
+            sessionStopped = true;
+            clearSession();
+            setSession(null);
+            setNotice('Sign-in expired. Visits still waiting on this phone are kept until you sign in again.');
+            break;
+          }
         } catch {
           const current = readQueue();
           const still = current.find(row => row.officialId === officialId && visitKeyOf(row) === key);
           if (still) writeQueue(mergeVisit(current, officialId, key, {...still, state: 'waiting', error: still.error || ''}));
         }
       }
-      if (manual || attempted) {
+      if (!sessionStopped && (manual || attempted)) {
         if (attempted && sent === attempted) setNotice('Queued visits were sent to the register.');
         else if (sent) setNotice(sent + ' queued visit' + (sent === 1 ? '' : 's') + ' sent. Rejected visits stay until you correct or dismiss them.');
         else if (manual && !attempted) setNotice('No waiting visits to retry.');
@@ -215,7 +225,7 @@ export function App() {
     setHistory(readHistory());
     setRecovery(true);
   }
-  function clearPhoneData() {
+  async function clearPhoneData() {
     const officialId = getSession()?.id || '';
     const base = getRegisterBase();
     const scope = accountScope();
@@ -229,8 +239,29 @@ export function App() {
       } catch { /* keep going */ }
     }
     writeQueue(readQueue().filter(item => !(item.officialId === officialId && item.registerBase === base)));
-    pushHistory({action: 'cleared', vendorId: '', kind: 'Phone data', detail: 'Drafts, queue, vendor cache and history for this official were cleared on this device.'});
-    setNotice('Phone copies for this official were cleared. Sign out other devices from the register if the phone is lost.');
+    activeVendor.current = '';
+    correcting.current = null;
+    visitKey.current = '';
+    setVendor(null);
+    setEvents([]);
+    setDeliveries([]);
+    setNote('');
+    setDue('');
+    setGPS(null);
+    setKind('Inspection');
+    setVisit(false);
+    setId('');
+    setCardWarning('');
+    setRecordStale('');
+    setHistory([]);
+    setError('');
+    try {
+      await flushPrivateStorage();
+      setNotice('Phone copies for this official were cleared, including the open vendor, notes, GPS and any correction. Sign out other devices from the register if the phone is lost.');
+    } catch {
+      setNotice('');
+      setError('Phone data could not be fully cleared because encrypted storage did not finish saving. Try again.');
+    }
   }
 
   function requireServer() {
@@ -450,7 +481,8 @@ export function App() {
         setNote('');
         setDue('');
         setGPS(null);
-        setNotice('Saved on this phone. It will be sent when the register can be reached. The same visit will not be saved twice.');
+        visitKey.current = '';
+        setNotice('Saved on this phone. It will be sent when the register can be reached. The next visit for this vendor is a separate record.');
         correcting.current = null;
       } else {
         const officialId = getSession()?.id || '';
